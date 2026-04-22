@@ -1,0 +1,18 @@
+/out
+# Visual Studio
+.vs/
+*.vcxproj*
+*.sln
+
+# Build output
+out/
+build/
+cmake-build-*/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+
+# OS
+.DS_Store
+Thumbs.db
