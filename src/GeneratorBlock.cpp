@@ -4,6 +4,17 @@
 #include "Queue.hpp"
 #include "ConfigManager.hpp"
 #include "GeneratorBlock.hpp"
+#include <memory>
+
+
+
+inline std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
+    if (config.mode == Mode::CSV) {
+        return std::make_unique<CSVDataSource>(config.input_file, config.columns);
+    }
+    return std::make_unique<RandomDataSource>(config.columns);
+}
+
 
 class GeneratorBlock {
 public:
