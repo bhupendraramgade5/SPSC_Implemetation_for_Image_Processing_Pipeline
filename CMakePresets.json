@@ -32,10 +32,13 @@
         {
             "name": "x64-release",
             "displayName": "x64 Release",
-            "inherits": "x64-debug",
-            "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
-            }
+          "inherits": "x64-debug",
+
+          "cacheVariables": {
+            "CMAKE_BUILD_TYPE": "Release"
+
+          }
+          
         },
         {
             "name": "x86-debug",

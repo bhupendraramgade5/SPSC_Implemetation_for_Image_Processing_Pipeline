@@ -4,6 +4,7 @@
 #include <iostream>
 #include <algorithm>
 
+
 static std::string trim(const std::string& s) {
     size_t start = s.find_first_not_of(" \t");
     size_t end = s.find_last_not_of(" \t");
@@ -11,8 +12,34 @@ static std::string trim(const std::string& s) {
 }
 
 SystemConfig ConfigManager::load(int argc, char** argv) {
-    SystemConfig config = parseFile("config.cfg");
+    
+    std::string cfg_path = "config.cfg";
+    bool explicit_path = false;
 
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        // --config=<path> style
+        if (arg.rfind("--config=", 0) == 0) {
+            cfg_path = arg.substr(9);
+            explicit_path = true;
+            break;
+        }
+    }
+    std::cout << "[ConfigManager] Config Path : " << cfg_path << '\n';
+
+    std::ifstream probe(cfg_path);
+    if (!probe.is_open()) {
+        if (explicit_path) {
+            throw std::runtime_error(
+                "Config file not found: '" + cfg_path + "'");
+        }
+        std::cerr << "[ConfigManager] Warning: '" << cfg_path
+                  << "' not found, using compiled-in defaults + CLI args.\n";
+    }
+    probe.close();
+
+    SystemConfig config = parseFile(cfg_path);
     overrideWithCLI(config, argc, argv);
 
     validate(config);
@@ -26,6 +53,7 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
         std::cerr << "Warning: config file not found, using defaults\n";
+        std::cout<<"Path : "<<path<<std::endl;
         return config;
     }
 
@@ -65,18 +93,33 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
 
+        // Skip bare positional arguments (the config file path).
+        if (arg.rfind("--", 0) != 0) continue;
+
         if (arg == "--mode=csv") {
             config.mode = Mode::CSV;
         } else if (arg == "--mode=random") {
             config.mode = Mode::RANDOM;
         }
-        // Extend as needed
     }
 }
 
 void ConfigManager::validate(SystemConfig& config) {
     if (config.columns == 0) {
         throw std::runtime_error("Invalid config: columns (m) must be > 0");
+    }
+    
+    if (config.columns < 2) {
+        throw std::runtime_error(
+            "Invalid config: columns (m) must be >= 2 "
+            "(pipeline outputs 2 consecutive pixels per cycle)");
+    }
+
+    if (config.columns % 2 != 0) {
+        throw std::runtime_error(
+            "Invalid config: columns (m) must be even "
+            "(pipeline outputs 2 consecutive pixels per cycle, got m="
+            + std::to_string(config.columns) + ")");
     }
 
     if (config.cycle_time_ns == 0) {

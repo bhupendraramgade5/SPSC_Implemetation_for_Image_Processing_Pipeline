@@ -139,25 +139,6 @@ GeneratorBlock::GeneratorBlock(const SystemConfig&          config,
 {}
 
 
-//
-//void GeneratorBlock::run() {
-//    while (true) {
-//        auto start = std::chrono::steady_clock::now();
-//
-//        DataPacket packet;
-//        if (!source_->next(packet)) break;
-//
-//        queue_.push(packet);
-//
-//        auto end = std::chrono::steady_clock::now();
-//        auto elapsed = end - start;
-//
-//        auto target = std::chrono::nanoseconds(config_.cycle_time_ns);
-//        if (elapsed < target)
-//            std::this_thread::sleep_for(target - elapsed);
-//    }
-//}
-
 void GeneratorBlock::run() {
     const auto cycle = std::chrono::nanoseconds(config_.cycle_time_ns);
     const bool use_spin = (config_.cycle_time_ns < SPIN_THRESHOLD_NS);
@@ -191,11 +172,8 @@ void GeneratorBlock::stop() {
 void GeneratorBlock::spinWaitUntil(
         std::chrono::steady_clock::time_point deadline) const
 {
-    // Busy-spin: burns CPU but gives nanosecond-accurate wait times, which
-    // sleep_for cannot guarantee on Windows for T < ~1 ms.
     while (std::chrono::steady_clock::now() < deadline) {
-        // Hint to the CPU that this is a spin-wait loop so it can reduce
-        // power / avoid pipeline stalls.  Compiles to PAUSE on x86.
+        
     #if defined(_MSC_VER)
             _mm_pause();
     #elif defined(__GNUC__) || defined(__clang__)

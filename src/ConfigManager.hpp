@@ -5,9 +5,8 @@
 #include <vector>
 #include <cstdint>
 #include <iostream> 
-// -----------------------------
+
 // Mode Enum
-// -----------------------------
 enum class Mode {
     RANDOM,
     CSV
@@ -17,23 +16,6 @@ inline std::ostream& operator<<(std::ostream& os, Mode m) {
     return os << (m == Mode::CSV ? "CSV" : "RANDOM");
 }
 
-// -----------------------------
-// System Configuration Struct
-
-// struct SystemConfig {
-//     
-//     size_t columns;          
-// 
-//     uint64_t cycle_time_ns;
-//     // TV : Required Input  (Threshold Value)
-//     uint8_t threshold;
-//     //Kerner : Loaded from Config
-//     std::vector<float> kernel;
-//     // Mode : Loaded from Config : Test or Rnadom 
-//     Mode mode;              
-//     // Config File Path : Loaded from CLI        
-//     std::string input_file;         
-// };
 
 struct SystemConfig {
     // m : Required Input   (Matrix Size)

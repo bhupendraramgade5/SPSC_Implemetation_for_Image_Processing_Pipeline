@@ -22,11 +22,7 @@
 
 #include "ConfigManager.hpp"  
 
-//class IDataSource {
-//public:
-//    virtual bool next(DataPacket& packet) = 0;
-//    virtual ~IDataSource() = default;
-//};
+
 
 class RandomDataSource : public IDataSource {
 public:
