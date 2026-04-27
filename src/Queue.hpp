@@ -81,6 +81,11 @@ private:
 
 
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4324)  
+#endif
+
 template <typename T, std::size_t CAPACITY>
 class SPSCQueue : public IQueue<T> {
 
@@ -105,7 +110,6 @@ public:
         }
 
         buffer_[head & MASK] = item;
-=
 
         head_.store(next_head, std::memory_order_release);
         return true;
@@ -138,13 +142,18 @@ public:
 private:
     alignas(CACHE_LINE) std::atomic<std::size_t> head_;
 
-    char pad_[CACHE_LINE - sizeof(std::atomic<std::size_t>)];
+    //char pad_[CACHE_LINE - sizeof(std::atomic<std::size_t>)];
 
     alignas(CACHE_LINE) std::atomic<std::size_t> tail_;
 
     T buffer_[CAPACITY];
 };
 
+#ifdef _MSC_VER
+#pragma warning(pop)    // restore warning state — C4324 re-enabled after this point
+#endif
+
 using PipelineQueue = SPSCQueue<DataPacket, 64>;
+
 #endif // SIMPLE_QUEUE_HPP
 

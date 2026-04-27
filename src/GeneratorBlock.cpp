@@ -14,7 +14,7 @@
 
 static constexpr uint64_t SPIN_THRESHOLD_NS = 1'000'000ULL;
 
-inline std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
+std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
     if (config.mode == Mode::CSV) {
         return std::make_unique<CSVDataSource>(config.input_file, config.columns);
     }
@@ -139,24 +139,24 @@ GeneratorBlock::GeneratorBlock(const SystemConfig&          config,
 {}
 
 
-
-void GeneratorBlock::run() {
-    while (true) {
-        auto start = std::chrono::steady_clock::now();
-
-        DataPacket packet;
-        if (!source_->next(packet)) break;
-
-        queue_.push(packet);
-
-        auto end = std::chrono::steady_clock::now();
-        auto elapsed = end - start;
-
-        auto target = std::chrono::nanoseconds(config_.cycle_time_ns);
-        if (elapsed < target)
-            std::this_thread::sleep_for(target - elapsed);
-    }
-}
+//
+//void GeneratorBlock::run() {
+//    while (true) {
+//        auto start = std::chrono::steady_clock::now();
+//
+//        DataPacket packet;
+//        if (!source_->next(packet)) break;
+//
+//        queue_.push(packet);
+//
+//        auto end = std::chrono::steady_clock::now();
+//        auto elapsed = end - start;
+//
+//        auto target = std::chrono::nanoseconds(config_.cycle_time_ns);
+//        if (elapsed < target)
+//            std::this_thread::sleep_for(target - elapsed);
+//    }
+//}
 
 void GeneratorBlock::run() {
     const auto cycle = std::chrono::nanoseconds(config_.cycle_time_ns);
@@ -202,12 +202,4 @@ void GeneratorBlock::spinWaitUntil(
             __builtin_ia32_pause();
     #endif
     }
-}
-
-std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
-    if (config.mode == Mode::CSV) {
-        return std::make_unique<CSVDataSource>(config.input_file,
-                                               config.columns);
-    }
-    return std::make_unique<RandomDataSource>(config.columns);
 }
