@@ -73,7 +73,9 @@ public:
     void run();
     void stop();
 
-
+    uint64_t rows_emitted() const {
+        return rows_emitted_.load(std::memory_order_relaxed);
+    }
 
 private:
     void spinWaitUntil(std::chrono::steady_clock::time_point deadline) const;
@@ -82,8 +84,8 @@ private:
     IQueue<DataPacket>& queue_;
     std::unique_ptr<IDataSource> source_;
 
-    std::atomic<bool>            stop_flag_; // added new
-
+    std::atomic<bool>   stop_flag_;
+    std::atomic<uint64_t> rows_emitted_{0};
 };
 
 std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config);

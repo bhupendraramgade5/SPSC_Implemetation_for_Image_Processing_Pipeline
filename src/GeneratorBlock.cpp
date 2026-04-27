@@ -143,6 +143,9 @@ void GeneratorBlock::run() {
     const auto cycle = std::chrono::nanoseconds(config_.cycle_time_ns);
     const bool use_spin = (config_.cycle_time_ns < SPIN_THRESHOLD_NS);
 
+    uint64_t prev_row = UINT64_MAX;  // sentinel: no row seen yet
+    uint64_t rows_completed = 0;
+
     while (!stop_flag_.load(std::memory_order_relaxed)) {
 
         const auto deadline = std::chrono::steady_clock::now() + cycle;
@@ -154,6 +157,15 @@ void GeneratorBlock::run() {
         
         queue_.push(packet);
 
+        if (prev_row != UINT64_MAX && packet.row != prev_row) {
+            ++rows_completed;
+            if (config_.max_rows > 0 && rows_completed >= config_.max_rows) {
+                break;
+            }
+        }
+        prev_row = packet.row;
+
+        // --- 4. Cycle pacing -------------------------------------------------
         if (use_spin) {
             spinWaitUntil(deadline);
         } else {

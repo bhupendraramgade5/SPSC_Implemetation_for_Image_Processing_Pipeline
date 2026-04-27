@@ -27,6 +27,8 @@ struct SystemConfig {
     std::vector<float> kernel;           
     Mode        mode          = Mode::RANDOM;
     std::string input_file;
+    uint64_t run_duration_ms = 0;
+    uint64_t max_rows        = 0;
 };
 
 // -----------------------------

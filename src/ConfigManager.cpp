@@ -3,11 +3,12 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <stdexcept>
 
 
 static std::string trim(const std::string& s) {
-    size_t start = s.find_first_not_of(" \t");
-    size_t end = s.find_last_not_of(" \t");
+    const size_t start = s.find_first_not_of(" \t\r\n");
+    const size_t end   = s.find_last_not_of(" \t\r\n");
     return (start == std::string::npos) ? "" : s.substr(start, end - start + 1);
 }
 
@@ -61,11 +62,11 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
     while (std::getline(file, line)) {
         if (line.empty() || line[0] == '#') continue;
 
-        auto pos = line.find('=');
+        const auto pos = line.find('=');
         if (pos == std::string::npos) continue;
 
-        std::string key = trim(line.substr(0, pos));
-        std::string value = trim(line.substr(pos + 1));
+        const std::string key   = trim(line.substr(0, pos));
+        const std::string value = trim(line.substr(pos + 1));
 
         if (key == "m") {
             config.columns = std::stoul(value);
@@ -84,6 +85,14 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
                 config.kernel.push_back(std::stof(trim(num)));
             }
         }
+        // -- New: termination controls ----------------------------------------
+        else if (key == "run_duration_ms") {
+            config.run_duration_ms = std::stoull(value);
+        }
+        else if (key == "max_rows") {
+            config.max_rows = std::stoull(value);
+        }
+        // unknown keys: silently ignored (forward-compatibility)
     }
 
     return config;
@@ -91,7 +100,7 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
 
 void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
+        const std::string arg = argv[i];
 
         // Skip bare positional arguments (the config file path).
         if (arg.rfind("--", 0) != 0) continue;
@@ -101,6 +110,14 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
         } else if (arg == "--mode=random") {
             config.mode = Mode::RANDOM;
         }
+        else if (arg.rfind("--duration=", 0) == 0) {
+            config.run_duration_ms = std::stoull(arg.substr(11));
+        }
+        else if (arg.rfind("--max-rows=", 0) == 0) {
+            config.max_rows = std::stoull(arg.substr(11));
+        }
+        // --config=<path> is consumed in load() — ignore here
+        // unknown flags: silently ignored
     }
 }
 
@@ -133,6 +150,13 @@ void ConfigManager::validate(SystemConfig& config) {
     if (config.kernel.size() % 2 == 0) {
         throw std::runtime_error("Kernel size must be odd");
     }
+
+    if (config.mode == Mode::CSV && config.input_file.empty()) {
+        throw std::runtime_error(
+            "Invalid config: CSV mode requires input_file to be set");
+    }
+
+    // run_duration_ms / max_rows: 0 = unlimited; any non-negative value OK.
 }
 
 std::vector<float> ConfigManager::defaultKernel() {

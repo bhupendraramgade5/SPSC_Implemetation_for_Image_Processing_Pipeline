@@ -2,11 +2,8 @@
 #define FILTER_BLOCK_HPP
 
 #include "Queue.hpp"           // IQueue<T>, DataPacket
-#include "FilteredPacket.hpp"  // FilteredPacket
+#include "FilterUtils.hpp"  // FilteredPacket
 #include "ConfigManager.hpp"   // SystemConfig
-#include "SlidingWindow.hpp"   // SlidingWindow
-#include "Thresholder.hpp"     // IThresholder
-#include "BoundaryPolicy.hpp"  // BoundaryPolicy
 
 #include <vector>
 #include <memory>

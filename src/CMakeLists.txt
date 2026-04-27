@@ -9,11 +9,14 @@
 set(CYNLR_SOURCES
     ConfigManager.cpp
     GeneratorBlock.cpp
+    Filterblock.cpp
     # FilterBlock.cpp     <- uncomment when implemented
 )
 # added new 
 set(CYNLR_HEADERS
     ConfigManager.hpp
+    FilterUtils.hpp
+    Filterblock.hpp
     GeneratorBlock.hpp
     Queue.hpp
     # FilterBlock.hpp     <- uncomment when implemented
@@ -97,18 +100,3 @@ else()
       FAIL_REGULAR_EXPRESSION "\\[FAIL\\]"
     )
 endif()
-# ENDOFFILE
-
-# # Step 3 — Verify the file now contains add_executable(test_generator
-# grep "add_executable(test_generator" src/CMakeLists.txt
-
-# # Step 4 — Wipe and reconfigure
-# rm -rf out/
-# cmake -S . -B out
-
-# # # Step 5 — Build both targets
-# cmake --build out -j
-
-# # # Step 6 — Build and run the tests
-# # cmake --build out --target test_generator -j
-# ./out/bin/test_generator
