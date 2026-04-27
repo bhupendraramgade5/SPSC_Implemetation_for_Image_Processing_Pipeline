@@ -57,3 +57,7 @@ set_target_properties(CynLr PROPERTIES
 
 
 # TODO: Add tests and install targets if needed.
+
+# Register with CTest so "cmake --build . --target RUN_TESTS" works from VS.
+enable_testing()
+add_test(NAME GeneratorBlockTests COMMAND test_generator)
