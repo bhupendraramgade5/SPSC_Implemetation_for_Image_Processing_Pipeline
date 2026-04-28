@@ -80,13 +80,10 @@ static bool shouldTerminate(const SystemConfig&                          cfg,
                             const std::chrono::steady_clock::time_point& deadline,
                             const std::atomic<bool>&                     generator_done)
 {
-    if (generator_done.load(std::memory_order_acquire)) return true;
-    if (g_shutdown_requested.load(std::memory_order_relaxed)) return true;
-    if (cfg.run_duration_ms > 0
-        && std::chrono::steady_clock::now() >= deadline) {
-        return true;
-    }
-
+    if (generator_done.load(std::memory_order_acquire))          return true;
+    if (g_shutdown_requested.load(std::memory_order_relaxed))    return true;
+    if (cfg.run_duration_ms > 0 &&
+        std::chrono::steady_clock::now() >= deadline)            return true;
     return false;
 }
 int main(int argc, char** argv) {
@@ -171,15 +168,22 @@ int main(int argc, char** argv) {
     std::cout << " Pipeline Summary\n";
     std::cout << "========================================\n";
     std::cout << " Rows generated   : " << generator.rows_emitted() << "\n";
+    std::cout << " Packets dropped  : " << generator.dropped_packets();
+    if (generator.dropped_packets() > 0)
+        std::cout << "  ← T too low for filter throughput on this hardware";
+    std::cout << "\n";
     std::cout << " Output packets   : " << total_packets            << "\n";
     std::cout << " Output pixels    : " << total_packets * 2        << "\n";
     std::cout << " Ones  (1)        : " << ones                     << "\n";
     std::cout << " Zeros (0)        : " << zeros                    << "\n";
-    std::cout << " Peak queue depth : " << gen_to_filter.peak_occupancy()
-              << " / " << queue_capacity << " packets (limit = m/2)\n";
+    const std::size_t actual_cap = gen_to_filter.capacity();
+    const std::size_t peak       = gen_to_filter.peak_occupancy();
+    std::cout << " Queue capacity   : " << actual_cap
+              << " packets (next pow2 above m/2=" << queue_capacity << ")\n";
+    std::cout << " Peak queue depth : " << peak
+              << " / " << queue_capacity << " (m/2 limit)\n";
     std::cout << " Memory OK        : "
-              << (gen_to_filter.peak_occupancy() <= queue_capacity ? "YES" : "NO")
-              << "\n";
+              << (peak <= queue_capacity ? "YES" : "NO") << "\n";
     std::cout << " Shutdown cause   : ";
     if (g_shutdown_requested.load())
         std::cout << "signal (SIGINT/SIGTERM)\n";

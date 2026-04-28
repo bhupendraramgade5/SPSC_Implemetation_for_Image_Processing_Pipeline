@@ -3,6 +3,10 @@
 #include <chrono>
 #include <thread>
 #include <stdexcept>
+
+#if defined(_MSC_VER)
+    #include <immintrin.h>
+#endif
 FilterBlock::FilterBlock(const SystemConfig&           config,
                          IQueue<DataPacket>&           in_queue,
                          IQueue<FilteredPacket>&       out_queue,
@@ -34,11 +38,16 @@ void FilterBlock::run() {
 
     DataPacket packet;
 
-    while (running_.load(std::memory_order_relaxed) || in_queue_.pop(packet)) {
+    while (true) {
 
         // Try to get the next packet; spin-yield if queue is temporarily empty
         if (!in_queue_.pop(packet)) {
-            std::this_thread::yield();
+            if (!running_.load(std::memory_order_relaxed)) break;
+#if defined(_MSC_VER)
+            _mm_pause();
+#elif defined(__GNUC__) || defined(__clang__)
+            __builtin_ia32_pause();
+#endif
             continue;
         }
 
@@ -75,9 +84,7 @@ void FilterBlock::run() {
 bool FilterBlock::processSample(uint8_t value, uint64_t row, uint64_t col) {
     window_.push(value, row, col);
 
-    if (!window_.is_full()) {
-        return false;  // Still filling up — not enough future samples yet
-    }
+    if (!window_.is_full()) return false;
 
     const WindowSlot& centre = window_.centre();
 
@@ -97,7 +104,10 @@ bool FilterBlock::processSample(uint8_t value, uint64_t row, uint64_t col) {
 
     return true;
 }
-void FilterBlock::flushRowEnd(uint8_t edge_value, uint64_t row, uint64_t last_col) {
+void FilterBlock::flushRowEnd(uint8_t edge_value,
+                               uint64_t row,
+                               uint64_t last_col)
+{
     for (size_t i = 0; i < half_width_; ++i) {
         uint8_t pad = applyRight(policy_, edge_value, i + 1);
         // Virtual col indices continue beyond last_col for position tagging

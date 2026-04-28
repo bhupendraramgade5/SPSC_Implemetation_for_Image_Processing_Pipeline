@@ -110,10 +110,8 @@ public:
     bool push(const T& item) override {
         const std::size_t head = head_.load(std::memory_order_relaxed);
         const std::size_t next_head = head + 1;
-        if ((next_head - tail_.load(std::memory_order_acquire)) > MASK) {
-            return false;   
-        }
-
+        if ((next_head - tail_.load(std::memory_order_acquire)) > MASK)
+            return false;
         buffer_[head & MASK] = item;
 
         head_.store(next_head, std::memory_order_release);
@@ -122,11 +120,8 @@ public:
 
     bool pop(T& item) override {
         const std::size_t tail = tail_.load(std::memory_order_relaxed);
-
-        if (tail == head_.load(std::memory_order_acquire)) {
-            return false; 
-        }
-
+        if (tail == head_.load(std::memory_order_acquire))
+            return false;
         item = buffer_[tail & MASK];
 
         tail_.store(tail + 1, std::memory_order_release);
@@ -139,9 +134,8 @@ public:
     }
 
     std::size_t size() const {
-        const std::size_t h = head_.load(std::memory_order_relaxed);
-        const std::size_t t = tail_.load(std::memory_order_relaxed);
-        return h - t;
+        return head_.load(std::memory_order_relaxed)
+             - tail_.load(std::memory_order_relaxed);
     }
 
 private:
@@ -194,10 +188,12 @@ public:
             next_head - tail_.load(std::memory_order_relaxed);
 
         std::size_t prev = peak_occupancy_.load(std::memory_order_relaxed);
-        while (current > prev &&
-               !peak_occupancy_.compare_exchange_weak(
-                   prev, current, std::memory_order_relaxed)) {
-            // prev is updated by CAS on failure — loop converges immediately.
+        while (current > prev) {
+            if (peak_occupancy_.compare_exchange_weak(
+                    prev, current, std::memory_order_relaxed)) {
+                break;  // successfully stored new peak
+            }
+            // prev updated by CAS on failure; loop re-checks condition
         }
 
         return true;
@@ -218,9 +214,8 @@ public:
     }
 
     std::size_t size() const {
-        const std::size_t h = head_.load(std::memory_order_relaxed);
-        const std::size_t t = tail_.load(std::memory_order_relaxed);
-        return h - t;
+        return head_.load(std::memory_order_relaxed)
+             - tail_.load(std::memory_order_relaxed);
     }
     std::size_t capacity() const { return capacity_; }
     std::size_t peak_occupancy() const {
@@ -233,7 +228,7 @@ public:
 
 private:
     static std::size_t nextPow2(std::size_t n) {
-        if (n == 0) return 1;
+        if (n <= 1) return 2;
         --n;
         n |= n >> 1;
         n |= n >> 2;

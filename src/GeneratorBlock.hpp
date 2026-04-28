@@ -80,6 +80,13 @@ public:
         return rows_emitted_.load(std::memory_order_relaxed);
     }
 
+    // Number of packets dropped due to back-pressure (queue full at deadline).
+    // Non-zero means T is set too low for the filter to keep up on this
+    // hardware.  Reported in the pipeline summary.
+    uint64_t dropped_packets() const {
+        return dropped_packets_.load(std::memory_order_relaxed);
+    }
+
 private:
     void spinWaitUntil(std::chrono::steady_clock::time_point deadline) const;
 
@@ -89,6 +96,7 @@ private:
 
     std::atomic<bool>   stop_flag_;
     std::atomic<uint64_t> rows_emitted_{0};
+    std::atomic<uint64_t> dropped_packets_{0};
 };
 
 std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config);

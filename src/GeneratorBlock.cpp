@@ -25,13 +25,10 @@ std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
 
 
 RandomDataSource::RandomDataSource(size_t columns)
-    : columns_(columns),
-      rng_(std::random_device{}()),
-      dist_(0, 255) 
+    : columns_(columns), rng_(std::random_device{}()), dist_(0, 255)
 {
-    if(columns_ == 0) {
+    if (columns_ == 0)
         throw std::invalid_argument("RandomDataSource: columns must be > 0");
-    }
 }
 
 bool RandomDataSource::next(DataPacket& packet) {
@@ -47,10 +44,7 @@ bool RandomDataSource::next(DataPacket& packet) {
 
 void RandomDataSource::advance() {
     col_ += 2;
-    if (col_ >= columns_) {
-        col_ = 0;
-        row_++;
-    }
+    if (col_ >= columns_) { col_ = 0; row_++; }
 }
 
 
@@ -60,16 +54,11 @@ CSVDataSource::CSVDataSource(const std::string& file,
                              CSVMismatchPolicy  mismatch_policy)
     : file_(file), columns_(columns), mismatch_policy_(mismatch_policy)
 {
-    // Check if file opened successfully
-    if(!file_.is_open()){
+    if (!file_.is_open())
         throw std::runtime_error(
             "CSVDataSource: cannot open file '" + file + "'");
-
-    }
-    // Check if columns is valid
-    if(columns_ == 0) {
+    if (columns_ == 0)
         throw std::invalid_argument("CSVDataSource: columns must be > 0");
-    }
 }
 
 bool CSVDataSource::next(DataPacket& packet) {
@@ -123,31 +112,28 @@ bool CSVDataSource::loadNextRow() {
                     "CSVDataSource: row " + std::to_string(row_) +
                     " has " + std::to_string(actual) +
                     " values, expected " + std::to_string(columns_) +
-                    ". Set csv_mismatch_policy = truncate or zero_pad "
-                    "to handle mismatches silently.");
+                    ". Set csv_mismatch_policy = truncate or zero_pad.");
 
             case CSVMismatchPolicy::TRUNCATE:
                 if (actual > columns_) {
                     buffer_.resize(columns_);
-                }
-                if (actual < columns_) {
+                } else {
                     std::cerr << "[CSVDataSource] Warning: row " << row_
                               << " has only " << actual
-                              << " values (expected " << columns_
-                              << "), row skipped (TRUNCATE policy).\n";
+                              << " values, row skipped (TRUNCATE).\n";
                     buffer_.clear();
                 }
                 break;
+
             case CSVMismatchPolicy::ZERO_PAD:
                 if (actual > columns_) {
                     buffer_.resize(columns_);
                 } else {
-                    while (buffer_.size() < columns_) {
+                    while (buffer_.size() < columns_)
                         buffer_.push_back(0);
-                    }
                     std::cerr << "[CSVDataSource] Warning: row " << row_
                               << " padded from " << actual
-                              << " to " << columns_ << " values.\n";
+                              << " to " << columns_ << " (ZERO_PAD).\n";
                 }
                 break;
         }
@@ -160,9 +146,7 @@ bool CSVDataSource::loadNextRow() {
 
 void CSVDataSource::advanceCol() {
     col_ += 2;
-    if (col_ >= columns_) {
-        col_ = 0;
-    }
+    if (col_ >= columns_) col_ = 0;
 }
 
 GeneratorBlock::GeneratorBlock(const SystemConfig&          config,
@@ -172,6 +156,7 @@ GeneratorBlock::GeneratorBlock(const SystemConfig&          config,
     , queue_(queue)
     , source_(std::move(source))
     , stop_flag_(false)
+    , dropped_packets_(0)
 {}
 
 
@@ -187,18 +172,29 @@ void GeneratorBlock::run() {
         const auto deadline = std::chrono::steady_clock::now() + cycle;
 
         DataPacket packet{};
-        if (!source_->next(packet)) {
+        if (!source_->next(packet)) break;  // CSV exhausted
+        bool pushed = false;
+        while (!pushed) {
+            pushed = queue_.push(packet);
+            if (!pushed) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    dropped_packets_.fetch_add(1, std::memory_order_relaxed);
             break;
         }
         
-        queue_.push(packet);
+#if defined(_MSC_VER)
+                _mm_pause();
+#elif defined(__GNUC__) || defined(__clang__)
+                __builtin_ia32_pause();
+#endif
+            }
+        }
 
         if (prev_row != UINT64_MAX && packet.row != prev_row) {
             ++rows_completed;
             rows_emitted_.store(rows_completed, std::memory_order_relaxed);
-            if (config_.max_rows > 0 && rows_completed >= config_.max_rows) {
+            if (config_.max_rows > 0 && rows_completed >= config_.max_rows)
                 break;
-            }
         }
         prev_row = packet.row;
 
@@ -207,9 +203,8 @@ void GeneratorBlock::run() {
             spinWaitUntil(deadline);
         } else {
             const auto now = std::chrono::steady_clock::now();
-            if (now < deadline) {
+            if (now < deadline)
                 std::this_thread::sleep_for(deadline - now);
-            }
         }
     }
 }
