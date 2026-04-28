@@ -7,6 +7,8 @@
 #if defined(_MSC_VER)
     #include <immintrin.h>
 #endif
+
+
 FilterBlock::FilterBlock(const SystemConfig&           config,
                          IQueue<DataPacket>&           in_queue,
                          IQueue<FilteredPacket>&       out_queue,
@@ -96,10 +98,16 @@ bool FilterBlock::processSample(uint8_t value, uint64_t row, uint64_t col) {
         pending_.row    = centre.row;
         pending_.col    = centre.col;
         pending_.has_b1 = true;
+        #ifdef CYNLR_PERF_BUILD
+            pending_.t1 = read_clock();
+        #endif
     } else {
         // b1 was already stored; this is b2
         pending_.b2     = binary;
         pending_.has_b2 = true;
+        #ifdef CYNLR_PERF_BUILD
+            pending_.t2 = read_clock();
+        #endif
     }
 
     return true;
@@ -143,6 +151,10 @@ void FilterBlock::emitIfReady() {
     fp.b2  = pending_.b2;
     fp.row = pending_.row;
     fp.col = pending_.col;
+    #ifdef CYNLR_PERF_BUILD
+        fp.t1 = pending_.t1;
+        fp.t2 = pending_.t2;
+    #endif
 
     out_queue_.push(fp);
     pending_ = PendingOutput{};

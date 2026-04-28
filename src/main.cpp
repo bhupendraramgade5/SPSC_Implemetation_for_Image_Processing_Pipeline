@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
     std::cout << " Rows generated   : " << generator.rows_emitted() << "\n";
     std::cout << " Packets dropped  : " << generator.dropped_packets();
     if (generator.dropped_packets() > 0)
-        std::cout << "  ← T too low for filter throughput on this hardware";
+        std::cout << "<- T too low for filter throughput on this hardware";
     std::cout << "\n";
     std::cout << " Output packets   : " << total_packets            << "\n";
     std::cout << " Output pixels    : " << total_packets * 2        << "\n";

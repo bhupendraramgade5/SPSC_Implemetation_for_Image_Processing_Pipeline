@@ -11,6 +11,11 @@ struct FilteredPacket {
     uint8_t  b2  = 0;
     uint64_t row = 0;
     uint64_t col = 0;
+
+    #ifdef CYNLR_PERF_BUILD
+    uint64_t t1=0;
+    uint64_t t2=0;
+    #endif
 };
 
 inline uint8_t applyLeft(BoundaryPolicy policy, uint8_t edge, size_t /*offset*/) {

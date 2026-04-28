@@ -44,6 +44,13 @@ endif()
 
 # Usage from command line:
 #   cmake -S . -B build -DCYNLR_USE_GTEST=ON
+option(CYNLR_PERF "Enable performance instrumentation" OFF)
+if(CYNLR_PERF)
+    target_compile_definitions(cynlr_compiler_options INTERFACE CYNLR_PERF_BUILD)
+    message(STATUS "Performance instrumentation ENABLED")
+else()
+    message(STATUS "Performance instrumentation DISABLED")
+endif()
 
 
 if(CYNLR_USE_GTEST)

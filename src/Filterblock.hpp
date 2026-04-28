@@ -9,6 +9,14 @@
 #include <memory>
 #include <atomic>
 
+#ifdef CYNLR_PERF_BUILD
+#include <chrono>
+
+inline uint64_t read_clock() {
+    return std::chrono::steady_clock::now().time_since_epoch().count();
+}
+#endif
+
 class FilterBlock {
 public:
     FilterBlock(const SystemConfig&           config,
@@ -42,6 +50,10 @@ private:
         uint8_t b2     = 0;
         uint64_t row   = 0;
         uint64_t col   = 0;   // col of b1
+        #ifdef CYNLR_PERF_BUILD
+            uint64_t t1    = 0;
+            uint64_t t2    = 0;
+        #endif
     };
     PendingOutput pending_;
 
