@@ -21,12 +21,14 @@
 #include <chrono>
 #include <iomanip>
 #include <csignal>
+#define NOMINMAX
+#include <windows.h>
 
 #include "ConfigManager.hpp"
 #include "Queue.hpp"
 #include "GeneratorBlock.hpp"
 #include "FilterBlock.hpp"      // FilterBlock (pulls in FilterUtils.hpp)
-
+#include "PerfTest.hpp"       // performance measurement utilities (optional)
 //static constexpr uint64_t RUN_DURATION_MS = 200;   
 namespace {
     std::atomic<bool> g_shutdown_requested{false};
@@ -88,6 +90,8 @@ static bool shouldTerminate(const SystemConfig&                          cfg,
 }
 int main(int argc, char** argv) {
 
+    SetProcessAffinityMask(GetCurrentProcess(), 3);
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
     installSignalHandlers();
     // 1. Load configuration
     // -------------------------------------------------------------------------
@@ -155,13 +159,61 @@ int main(int argc, char** argv) {
     size_t total_packets = 0;
     size_t ones          = 0;
     size_t zeros         = 0;
+    
+    #ifdef CYNLR_PERF_BUILD
+    std::vector<uint64_t> gaps;
+    gaps.reserve(1 << 20);  // optional: preallocate ~1M entries
+
+    bool has_prev = false;
+    uint64_t prev = 0;
+    #endif
 
     FilteredPacket fp;
+
     while (filter_output.pop(fp)) {
+
         ++total_packets;
         if (fp.b1 == 1) ++ones; else ++zeros;
         if (fp.b2 == 1) ++ones; else ++zeros;
+
+        #ifdef CYNLR_PERF_BUILD
+            // Pixel 1
+            if (has_prev) {
+                gaps.push_back(fp.t1 - prev);
+            }
+            prev = fp.t1;
+            has_prev = true;
+
+            // Pixel 2
+            if (has_prev) {
+                gaps.push_back(fp.t2 - prev);
+            }
+            prev = fp.t2;
+        #endif
     }
+
+   #ifdef CYNLR_PERF_BUILD
+        auto stats = computePerfStats(gaps);
+
+        std::cout << "\n========================================\n";
+        std::cout << " Performance Report\n";
+        std::cout << "========================================\n";
+
+        std::cout << " Samples       : " << stats.count << "\n";
+        std::cout << " Min gap (ns)  : " << stats.min_gap << "\n";
+        std::cout << " Max gap (ns)  : " << stats.max_gap << "\n";
+        std::cout << " Avg gap (ns)  : " << stats.avg_gap << "\n";
+        std::cout << " P99 gap (ns)  : " << stats.p99_gap << "\n";
+
+        std::cout << " Requirement   : gap <= T (" << config.cycle_time_ns << " ns)\n";
+
+        if (stats.max_gap <= config.cycle_time_ns)
+            std::cout << " RESULT        : PASS\n";
+        else
+            std::cout << " RESULT        : FAIL\n";
+
+        std::cout << "========================================\n";
+    #endif
 
     // 8. Summary
     std::cout << "\n========================================\n";

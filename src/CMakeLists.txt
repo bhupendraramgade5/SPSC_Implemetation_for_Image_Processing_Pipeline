@@ -10,6 +10,7 @@ set(CYNLR_SOURCES
     ConfigManager.cpp
     GeneratorBlock.cpp
     Filterblock.cpp
+    # PerfTest.hpp
     # FilterBlock.cpp     <- uncomment when implemented
 )
 # added new 
@@ -19,6 +20,7 @@ set(CYNLR_HEADERS
     Filterblock.hpp
     GeneratorBlock.hpp
     Queue.hpp
+    PerfTest.hpp
     # FilterBlock.hpp     <- uncomment when implemented
 )
 

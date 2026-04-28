@@ -162,7 +162,7 @@ GeneratorBlock::GeneratorBlock(const SystemConfig&          config,
 
 void GeneratorBlock::run() {
     const auto cycle = std::chrono::nanoseconds(config_.cycle_time_ns);
-    const bool use_spin = (config_.cycle_time_ns < SPIN_THRESHOLD_NS);
+    // const bool use_spin = (config_.cycle_time_ns < SPIN_THRESHOLD_NS);
 
     uint64_t prev_row = UINT64_MAX;  // sentinel: no row seen yet
     uint64_t rows_completed = 0;
@@ -199,13 +199,30 @@ void GeneratorBlock::run() {
         prev_row = packet.row;
 
         // --- 4. Cycle pacing -------------------------------------------------
-        if (use_spin) {
+        // if (use_spin) {
+        //     spinWaitUntil(deadline);
+        // } else {
+
+            // auto now = std::chrono::steady_clock::now();
+            // auto remaining = deadline - now;
+
+            // if (remaining> std::chrono::microseconds(50))
+            //     std::this_thread::sleep_for(deadline - now);
+            // else
+            //     spinWaitUntil(deadline);
+
+            auto now = std::chrono::steady_clock::now();
+            auto remaining = deadline - now;
+
+            if (remaining > std::chrono::microseconds(50)) {
+                // Sleep most of it, but leave margin
+                std::this_thread::sleep_for(remaining - std::chrono::microseconds(20));
+            }
+
+            // Finish precisely
             spinWaitUntil(deadline);
-        } else {
-            const auto now = std::chrono::steady_clock::now();
-            if (now < deadline)
-                std::this_thread::sleep_for(deadline - now);
-        }
+
+        // }
     }
 }
 
