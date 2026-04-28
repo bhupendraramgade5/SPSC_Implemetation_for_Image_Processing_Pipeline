@@ -45,7 +45,9 @@ private:
 
 class CSVDataSource : public IDataSource {
 public:
-    CSVDataSource(const std::string& file, size_t columns);
+    CSVDataSource(const std::string& file, 
+	size_t columns,
+                  CSVMismatchPolicy  mismatch_policy = CSVMismatchPolicy::REJECT);
 
     bool next(DataPacket& packet) override;
 
@@ -61,6 +63,7 @@ private:
     size_t columns_;
     uint64_t row_ = 0;
     uint64_t col_ = 0;
+    CSVMismatchPolicy mismatch_policy_;
 };
 
 

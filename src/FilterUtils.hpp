@@ -1,20 +1,18 @@
 #ifndef FILTER_UTILS_HPP
 #define FILTER_UTILS_HPP
 
+#include "ConfigManager.hpp"
 #include <cstdint>
 #include <vector>
 #include <stdexcept>
 #include <algorithm>
 struct FilteredPacket {
-    uint8_t  b1;    // thresholded output for first pixel  (0 or 1)
-    uint8_t  b2;    // thresholded output for second pixel (0 or 1)
-    uint64_t row;
-    uint64_t col;   // column of b1; b2 is at col + 1
+    uint8_t  b1  = 0;
+    uint8_t  b2  = 0;
+    uint64_t row = 0;
+    uint64_t col = 0;
 };
-enum class BoundaryPolicy {
-    REPLICATE,
-    ZERO_PAD
-};
+
 inline uint8_t applyLeft(BoundaryPolicy policy, uint8_t edge, size_t /*offset*/) {
     switch (policy) {
         case BoundaryPolicy::REPLICATE: return edge;
@@ -55,9 +53,8 @@ public:
     const WindowSlot& at(size_t logical_index) const {
         return buffer_[(head_ + logical_index) % capacity_];
     }
-    const WindowSlot& centre() const {
-        return at(capacity_ / 2);
-    }
+    const WindowSlot& centre() const { return at(capacity_ / 2); }
+
     void reset() {
         std::fill(buffer_.begin(), buffer_.end(), WindowSlot{});
         head_   = 0;

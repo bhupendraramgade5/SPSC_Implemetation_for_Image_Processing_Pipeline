@@ -16,7 +16,8 @@ static constexpr uint64_t SPIN_THRESHOLD_NS = 1'000'000ULL;
 
 std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
     if (config.mode == Mode::CSV) {
-        return std::make_unique<CSVDataSource>(config.input_file, config.columns);
+        return std::make_unique<CSVDataSource>(
+            config.input_file, config.columns, config.csv_mismatch_policy);
     }
     return std::make_unique<RandomDataSource>(config.columns);
 }
@@ -53,8 +54,11 @@ void RandomDataSource::advance() {
 }
 
 
-CSVDataSource::CSVDataSource(const std::string& file, size_t columns)
-    : file_(file), columns_(columns) 
+// CSVDataSource
+CSVDataSource::CSVDataSource(const std::string& file,
+                             size_t             columns,
+                             CSVMismatchPolicy  mismatch_policy)
+    : file_(file), columns_(columns), mismatch_policy_(mismatch_policy)
 {
     // Check if file opened successfully
     if(!file_.is_open()){
@@ -110,12 +114,44 @@ bool CSVDataSource::loadNextRow() {
         buffer_.push_back(static_cast<uint8_t>(value));
     }
 
-    if (buffer_.size() != columns_) {
-        std::cerr << "CSVDataSource: row " << row_
-                  << " has " << buffer_.size()
-                  << " values, expected " << columns_ << '\n';
-    }
+    const size_t actual = buffer_.size();
 
+    if (actual != columns_) {
+        switch (mismatch_policy_) {
+            case CSVMismatchPolicy::REJECT:
+                throw std::runtime_error(
+                    "CSVDataSource: row " + std::to_string(row_) +
+                    " has " + std::to_string(actual) +
+                    " values, expected " + std::to_string(columns_) +
+                    ". Set csv_mismatch_policy = truncate or zero_pad "
+                    "to handle mismatches silently.");
+
+            case CSVMismatchPolicy::TRUNCATE:
+                if (actual > columns_) {
+                    buffer_.resize(columns_);
+                }
+                if (actual < columns_) {
+                    std::cerr << "[CSVDataSource] Warning: row " << row_
+                              << " has only " << actual
+                              << " values (expected " << columns_
+                              << "), row skipped (TRUNCATE policy).\n";
+                    buffer_.clear();
+                }
+                break;
+            case CSVMismatchPolicy::ZERO_PAD:
+                if (actual > columns_) {
+                    buffer_.resize(columns_);
+                } else {
+                    while (buffer_.size() < columns_) {
+                        buffer_.push_back(0);
+                    }
+                    std::cerr << "[CSVDataSource] Warning: row " << row_
+                              << " padded from " << actual
+                              << " to " << columns_ << " values.\n";
+                }
+                break;
+        }
+    }
 
     row_++;
     col_ = 0;
@@ -159,6 +195,7 @@ void GeneratorBlock::run() {
 
         if (prev_row != UINT64_MAX && packet.row != prev_row) {
             ++rows_completed;
+            rows_emitted_.store(rows_completed, std::memory_order_relaxed);
             if (config_.max_rows > 0 && rows_completed >= config_.max_rows) {
                 break;
             }

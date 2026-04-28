@@ -92,7 +92,15 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
         else if (key == "max_rows") {
             config.max_rows = std::stoull(value);
         }
-        // unknown keys: silently ignored (forward-compatibility)
+        else if (key == "boundary_policy") {
+            config.boundary_policy = parseBoundaryPolicy(value);
+        }
+        // -- CSV mismatch handling -----------------------------------------
+        else if (key == "csv_mismatch_policy") {
+            config.csv_mismatch_policy = parseCSVMismatchPolicy(value);
+        }
+        // -- Output stage (read by CSVWriterBlock, ignored here) -----------
+        // write_output, output_file — silently skipped
     }
 
     return config;
@@ -115,6 +123,12 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
         }
         else if (arg.rfind("--max-rows=", 0) == 0) {
             config.max_rows = std::stoull(arg.substr(11));
+        }
+        else if (arg.rfind("--boundary=", 0) == 0) {
+            config.boundary_policy = parseBoundaryPolicy(arg.substr(11));
+        }
+        else if (arg.rfind("--csv-mismatch=", 0) == 0) {
+            config.csv_mismatch_policy = parseCSVMismatchPolicy(arg.substr(15));
         }
         // --config=<path> is consumed in load() — ignore here
         // unknown flags: silently ignored
@@ -176,4 +190,13 @@ std::vector<float> ConfigManager::defaultKernel() {
 Mode ConfigManager::parseMode(const std::string& str) {
     if (str == "csv") return Mode::CSV;
     return Mode::RANDOM;
+}
+BoundaryPolicy ConfigManager::parseBoundaryPolicy(const std::string& str) {
+    if (str == "zero_pad") return BoundaryPolicy::ZERO_PAD;
+    return BoundaryPolicy::REPLICATE;   // default on unknown string
+}
+CSVMismatchPolicy ConfigManager::parseCSVMismatchPolicy(const std::string& str) {
+    if (str == "truncate") return CSVMismatchPolicy::TRUNCATE;
+    if (str == "zero_pad") return CSVMismatchPolicy::ZERO_PAD;
+    return CSVMismatchPolicy::REJECT;   // default on unknown string
 }

@@ -11,7 +11,7 @@
 #include <queue>        
 #include <stdexcept>    
 #include <type_traits>  
-
+#include <vector>
 
 struct DataPacket {
     uint8_t  v1  = 0;
@@ -71,6 +71,11 @@ public:
     bool empty() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         return queue_.empty();
+    }
+
+    size_t size() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return queue_.size();
     }
 
 private:
@@ -153,6 +158,101 @@ private:
 #pragma warning(pop)    // restore warning state — C4324 re-enabled after this point
 #endif
 
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4324)
+#endif
+
+template <typename T>
+class DynamicSPSCQueue : public IQueue<T> {
+
+    static_assert(std::is_trivially_copyable<T>::value,
+                  "DynamicSPSCQueue<T>: T must be trivially copyable");
+
+    static constexpr std::size_t CACHE_LINE = 64;
+
+public:
+    explicit DynamicSPSCQueue(std::size_t capacity_hint)
+        : capacity_(nextPow2(std::max(capacity_hint, std::size_t{2})))
+        , mask_(capacity_ - 1)
+        , buffer_(capacity_)
+        , head_(0)
+        , tail_(0)
+        , peak_occupancy_(0)
+    {}
+
+    bool push(const T& item) override {
+        const std::size_t head      = head_.load(std::memory_order_relaxed);
+        const std::size_t next_head = head + 1;
+
+        if ((next_head - tail_.load(std::memory_order_acquire)) > mask_)
+            return false;   // full — caller must retry or handle back-pressure
+
+        buffer_[head & mask_] = item;
+        head_.store(next_head, std::memory_order_release);
+        const std::size_t current =
+            next_head - tail_.load(std::memory_order_relaxed);
+
+        std::size_t prev = peak_occupancy_.load(std::memory_order_relaxed);
+        while (current > prev &&
+               !peak_occupancy_.compare_exchange_weak(
+                   prev, current, std::memory_order_relaxed)) {
+            // prev is updated by CAS on failure — loop converges immediately.
+        }
+
+        return true;
+    }
+
+    bool pop(T& item) override {
+        const std::size_t tail = tail_.load(std::memory_order_relaxed);
+        if (tail == head_.load(std::memory_order_acquire))
+            return false;   // empty
+        item = buffer_[tail & mask_];
+        tail_.store(tail + 1, std::memory_order_release);
+        return true;
+    }
+
+    bool empty() const override {
+        return tail_.load(std::memory_order_relaxed)
+            == head_.load(std::memory_order_acquire);
+    }
+
+    std::size_t size() const {
+        const std::size_t h = head_.load(std::memory_order_relaxed);
+        const std::size_t t = tail_.load(std::memory_order_relaxed);
+        return h - t;
+    }
+    std::size_t capacity() const { return capacity_; }
+    std::size_t peak_occupancy() const {
+        return peak_occupancy_.load(std::memory_order_relaxed);
+    }
+
+    void reset_peak() {
+        peak_occupancy_.store(0, std::memory_order_relaxed);
+    }
+
+private:
+    static std::size_t nextPow2(std::size_t n) {
+        if (n == 0) return 1;
+        --n;
+        n |= n >> 1;
+        n |= n >> 2;
+        n |= n >> 4;
+        n |= n >> 8;
+        n |= n >> 16;
+        n |= n >> 32;
+        return n + 1;
+    }
+    const std::size_t  capacity_;
+    const std::size_t  mask_;
+    std::vector<T>     buffer_;   // heap; data_ pointer permanently L1-resident
+    alignas(CACHE_LINE) std::atomic<std::size_t> head_;
+    alignas(CACHE_LINE) std::atomic<std::size_t> tail_;
+    alignas(CACHE_LINE) std::atomic<std::size_t> peak_occupancy_;
+};
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 using PipelineQueue = SPSCQueue<DataPacket, 64>;
 
 #endif // SIMPLE_QUEUE_HPP
