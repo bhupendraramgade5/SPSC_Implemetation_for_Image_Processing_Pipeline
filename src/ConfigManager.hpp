@@ -48,11 +48,15 @@ struct SystemConfig {
     uint8_t     threshold     = 0;       
     std::vector<float> kernel;           
     Mode        mode          = Mode::RANDOM;
-    std::string input_file;
+    std::string input_file = "sample_input.csv";
     uint64_t run_duration_ms = 0;
     uint64_t max_rows        = 0;
     BoundaryPolicy    boundary_policy     = BoundaryPolicy::REPLICATE;
     CSVMismatchPolicy csv_mismatch_policy = CSVMismatchPolicy::REJECT;
+
+    // Output stage — parsed here, consumed by OutputWriter
+    bool        write_output = false;
+    std::string output_file  = "output.csv";
 };
 
 // -----------------------------

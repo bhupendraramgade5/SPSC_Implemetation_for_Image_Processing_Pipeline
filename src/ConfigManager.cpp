@@ -29,6 +29,7 @@ SystemConfig ConfigManager::load(int argc, char** argv) {
     }
     std::cout << "[ConfigManager] Config Path : " << cfg_path << '\n';
 
+    {
     std::ifstream probe(cfg_path);
     if (!probe.is_open()) {
         if (explicit_path) {
@@ -39,6 +40,7 @@ SystemConfig ConfigManager::load(int argc, char** argv) {
                   << "' not found, using compiled-in defaults + CLI args.\n";
     }
     probe.close();
+	}
 
     SystemConfig config = parseFile(cfg_path);
     overrideWithCLI(config, argc, argv);
@@ -84,23 +86,20 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
             while (std::getline(ss, num, ',')) {
                 config.kernel.push_back(std::stof(trim(num)));
             }
-        }
-        // -- New: termination controls ----------------------------------------
-        else if (key == "run_duration_ms") {
+        } else if (key == "run_duration_ms") {
             config.run_duration_ms = std::stoull(value);
-        }
-        else if (key == "max_rows") {
+        } else if (key == "max_rows") {
             config.max_rows = std::stoull(value);
-        }
-        else if (key == "boundary_policy") {
+        } else if (key == "boundary_policy") {
             config.boundary_policy = parseBoundaryPolicy(value);
-        }
-        // -- CSV mismatch handling -----------------------------------------
-        else if (key == "csv_mismatch_policy") {
+        } else if (key == "csv_mismatch_policy") {
             config.csv_mismatch_policy = parseCSVMismatchPolicy(value);
+        }else if (key == "write_output") {
+            config.write_output = (value == "true" || value == "1" || value == "yes");
+        } else if (key == "output_file") {
+            config.output_file = value;
         }
-        // -- Output stage (read by CSVWriterBlock, ignored here) -----------
-        // write_output, output_file — silently skipped
+        
     }
 
     return config;
@@ -117,18 +116,18 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
             config.mode = Mode::CSV;
         } else if (arg == "--mode=random") {
             config.mode = Mode::RANDOM;
-        }
-        else if (arg.rfind("--duration=", 0) == 0) {
+        } else if (arg.rfind("--duration=", 0) == 0) {
             config.run_duration_ms = std::stoull(arg.substr(11));
-        }
-        else if (arg.rfind("--max-rows=", 0) == 0) {
+        } else if (arg.rfind("--max-rows=", 0) == 0) {
             config.max_rows = std::stoull(arg.substr(11));
-        }
-        else if (arg.rfind("--boundary=", 0) == 0) {
+        } else if (arg.rfind("--boundary=", 0) == 0) {
             config.boundary_policy = parseBoundaryPolicy(arg.substr(11));
-        }
-        else if (arg.rfind("--csv-mismatch=", 0) == 0) {
+        } else if (arg.rfind("--csv-mismatch=", 0) == 0) {
             config.csv_mismatch_policy = parseCSVMismatchPolicy(arg.substr(15));
+        }else if (arg == "--write-output") {
+            config.write_output = true;
+        } else if (arg.rfind("--output-file=", 0) == 0) {
+            config.output_file = arg.substr(14);
         }
         // --config=<path> is consumed in load() — ignore here
         // unknown flags: silently ignored

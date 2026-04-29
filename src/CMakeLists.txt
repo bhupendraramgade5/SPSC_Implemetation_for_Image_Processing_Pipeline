@@ -10,8 +10,6 @@ set(CYNLR_SOURCES
     ConfigManager.cpp
     GeneratorBlock.cpp
     Filterblock.cpp
-    # PerfTest.hpp
-    # FilterBlock.cpp     <- uncomment when implemented
 )
 # added new 
 set(CYNLR_HEADERS
@@ -21,7 +19,7 @@ set(CYNLR_HEADERS
     GeneratorBlock.hpp
     Queue.hpp
     PerfTest.hpp
-    # FilterBlock.hpp     <- uncomment when implemented
+    OutputWriter.hpp
 )
 
 # Commented for more flexible source/header management, and to avoid listing headers in the executable target.

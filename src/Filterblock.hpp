@@ -13,7 +13,8 @@
 #include <chrono>
 
 inline uint64_t read_clock() {
-    return std::chrono::steady_clock::now().time_since_epoch().count();
+    return static_cast<uint64_t>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
 }
 #endif
 

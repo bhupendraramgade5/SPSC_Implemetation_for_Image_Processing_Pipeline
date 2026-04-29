@@ -28,6 +28,7 @@
 #include "Queue.hpp"
 #include "GeneratorBlock.hpp"
 #include "FilterBlock.hpp"      // FilterBlock (pulls in FilterUtils.hpp)
+#include "OutputWriter.hpp"   // IOutputWriter, CSVOutputWriter, NullOutputWriter
 #include "PerfTest.hpp"       // performance measurement utilities (optional)
 //static constexpr uint64_t RUN_DURATION_MS = 200;   
 namespace {
@@ -42,20 +43,21 @@ static void installSignalHandlers() {
     std::signal(SIGTERM, signalHandler);
 }
 static void printConfig(const SystemConfig& cfg) {
-    std::cout << "========================================\n";
-    std::cout << " CynLr Pipeline\n";
-    std::cout << "========================================\n";
-    std::cout << " Mode             : " << cfg.mode << "\n";
-    if (cfg.mode == Mode::CSV) {
-        std::cout << " Input file       : " << cfg.input_file        << "\n";
-        std::cout << " CSV mismatch     : " << cfg.csv_mismatch_policy << "\n";
-    }
-    std::cout << " Columns (m)      : " << cfg.columns             << "\n";
-    std::cout << " Cycle (T)        : " << cfg.cycle_time_ns       << " ns\n";
-    std::cout << " Threshold        : " << static_cast<int>(cfg.threshold) << "\n";
-    std::cout << " Kernel size      : " << cfg.kernel.size()       << "\n";
-    std::cout << " Boundary policy  : " << cfg.boundary_policy     << "\n";
-
+    std::cout << "========================================\n"
+              << " CynLr Pipeline  (threaded)\n"
+              << "========================================\n"
+              << " Mode             : " << cfg.mode             << "\n";
+    if (cfg.mode == Mode::CSV)
+        std::cout << " Input file       : " << cfg.input_file        << "\n"
+                  << " CSV mismatch     : " << cfg.csv_mismatch_policy << "\n";
+    std::cout << " Columns (m)      : " << cfg.columns             << "\n"
+              << " Cycle (T)        : " << cfg.cycle_time_ns       << " ns\n"
+              << " Threshold        : " << static_cast<int>(cfg.threshold) << "\n"
+              << " Kernel size      : " << cfg.kernel.size()       << "\n"
+              << " Boundary policy  : " << cfg.boundary_policy     << "\n"
+              << " Write output     : " << (cfg.write_output ? "yes" : "no") << "\n";
+    if (cfg.write_output)
+        std::cout << " Output file      : " << cfg.output_file << "\n";
     std::cout << " Duration         : ";
     if (cfg.run_duration_ms == 0) std::cout << "unlimited\n";
     else                          std::cout << cfg.run_duration_ms << " ms\n";
@@ -68,9 +70,10 @@ static void printConfig(const SystemConfig& cfg) {
 }
 
 // Thread entry points
-static void runGenerator(GeneratorBlock& gen, std::atomic<bool>& generator_done) {
+// ---------------------------------------------------------------------------
+static void runGenerator(GeneratorBlock& gen, std::atomic<bool>& done) {
     gen.run();
-    generator_done.store(true, std::memory_order_release);
+    done.store(true, std::memory_order_release);
     std::cout << "[Generator] Done.\n";
 }
 static void runFilter(FilterBlock& filter) {
@@ -80,10 +83,10 @@ static void runFilter(FilterBlock& filter) {
 // shouldTerminate
 static bool shouldTerminate(const SystemConfig&                          cfg,
                             const std::chrono::steady_clock::time_point& deadline,
-                            const std::atomic<bool>&                     generator_done)
+                            const std::atomic<bool>&               gen_done)
 {
-    if (generator_done.load(std::memory_order_acquire))          return true;
-    if (g_shutdown_requested.load(std::memory_order_relaxed))    return true;
+    if (gen_done.load(std::memory_order_acquire))        return true;
+    if (g_shutdown_requested.load(std::memory_order_relaxed)) return true;
     if (cfg.run_duration_ms > 0 &&
         std::chrono::steady_clock::now() >= deadline)            return true;
     return false;
@@ -103,18 +106,16 @@ int main(int argc, char** argv) {
     try {
         config = ConfigManager::load(argc, argv);
     } catch (const std::exception& ex) {
-        std::cerr << "[ERROR] Config load failed: " << ex.what() << "\n";
+        std::cerr << "[ERROR] Config: " << ex.what() << "\n";
         return EXIT_FAILURE;
     }
 
     printConfig(config);
 
-    // 2. Construct the inter-block queue
-    //    PipelineQueue = SPSCQueue<DataPacket, 64>  (lock-free, production path)
-    //PipelineQueue queue;
-    const std::size_t queue_capacity = config.columns / 2;  // packets per row
-    DynamicSPSCQueue<DataPacket>    gen_to_filter(queue_capacity, queue_capacity);
-    SimpleQueue<FilteredPacket> filter_output;   // Filter → (next block / sink)
+    // 2. Queues
+    const std::size_t q_hint = config.columns / 2;
+    DynamicSPSCQueue<DataPacket>    gen_to_filter(q_hint);
+    SimpleQueue<FilteredPacket>     filter_output;
 
 
 
@@ -130,27 +131,27 @@ int main(int argc, char** argv) {
                        config.threshold,           // ← CHANGED: direct threshold
                        config.boundary_policy);
 
-    // 4. Launch threads
-    std::atomic<bool> generator_done{false};
+    // 4. Output writer (adapter – NullOutputWriter if write_output=false)
+    auto writer = makeOutputWriter(config);
 
-    std::thread gen_thread(runGenerator,
-                           std::ref(generator),
-                           std::ref(generator_done));
-
+    // 5. Launch threads
+    std::atomic<bool> gen_done{false};
+    std::thread gen_thread(runGenerator, std::ref(generator), std::ref(gen_done));
     std::thread filter_thread(runFilter, std::ref(filter));
                               //std::ref(filter));
     const auto deadline = std::chrono::steady_clock::now()
-                        + std::chrono::milliseconds(config.run_duration_ms);
-    while (!shouldTerminate(config, deadline, generator_done)) {
+                        + std::chrono::milliseconds(
+                              config.run_duration_ms > 0 ? config.run_duration_ms
+                                                         : UINT64_MAX / 2);
+    while (!shouldTerminate(config, deadline, gen_done))
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+
     generator.stop();
     gen_thread.join();
-    // 5. Consumer loop  (main thread)
-    // while (true) {
-    while (!gen_to_filter.empty()) {
+
+    // Drain gen_to_filter before stopping filter
+    while (!gen_to_filter.empty())
         std::this_thread::yield();
-    }
 
     //std::this_thread::sleep_for(std::chrono::nanoseconds(config.cycle_time_ns * 2));
     //    break;}
@@ -175,6 +176,7 @@ int main(int argc, char** argv) {
     FilteredPacket fp;
 
     while (filter_output.pop(fp)) {
+        writer->write(fp);          // <-- OutputWriter adapter
 
         ++total_packets;
         if (fp.b1 == 1) ++ones; else ++zeros;
@@ -195,59 +197,55 @@ int main(int argc, char** argv) {
             prev = fp.t2;
         #endif
     }
+    writer->finalize();
 
-   #ifdef CYNLR_PERF_BUILD
-        auto stats = computePerfStats(gaps);
+    // 8. Performance report (only when compiled with CYNLR_PERF_BUILD)
+#ifdef CYNLR_PERF_BUILD
+    auto stats = computePerfStats(gaps);
+    std::cout << "\n========================================\n"
+              << " Performance Report\n"
+              << "========================================\n"
+              << " Samples       : " << stats.count   << "\n"
+              << " Min gap (ns)  : " << stats.min_gap << "\n"
+              << " Max gap (ns)  : " << stats.max_gap << "\n"
+              << " Avg gap (ns)  : " << stats.avg_gap << "\n"
+              << " P99 gap (ns)  : " << stats.p99_gap << "\n"
+              << " Requirement   : gap <= T (" << config.cycle_time_ns << " ns)\n"
+              << " RESULT        : "
+              << (stats.max_gap <= config.cycle_time_ns ? "PASS" : "FAIL") << "\n"
+              << "========================================\n";
+#endif
 
-        std::cout << "\n========================================\n";
-        std::cout << " Performance Report\n";
-        std::cout << "========================================\n";
-
-        std::cout << " Samples       : " << stats.count << "\n";
-        std::cout << " Min gap (ns)  : " << stats.min_gap << "\n";
-        std::cout << " Max gap (ns)  : " << stats.max_gap << "\n";
-        std::cout << " Avg gap (ns)  : " << stats.avg_gap << "\n";
-        std::cout << " P99 gap (ns)  : " << stats.p99_gap << "\n";
-
-        std::cout << " Requirement   : gap <= T (" << config.cycle_time_ns << " ns)\n";
-
-        if (stats.max_gap <= config.cycle_time_ns)
-            std::cout << " RESULT        : PASS\n";
-        else
-            std::cout << " RESULT        : FAIL\n";
-
-        std::cout << "========================================\n";
-    #endif
-
-    // 8. Summary
-    std::cout << "\n========================================\n";
-    std::cout << " Pipeline Summary\n";
-    std::cout << "========================================\n";
-    std::cout << " Rows generated   : " << generator.rows_emitted() << "\n";
-    std::cout << " Packets dropped  : " << generator.dropped_packets();
-    if (generator.dropped_packets() > 0)
-        std::cout << " <- T too low for filter throughput on this hardware";
-    std::cout << "\n";
-    std::cout << " Output packets   : " << total_packets            << "\n";
-    std::cout << " Output pixels    : " << total_packets * 2        << "\n";
-    std::cout << " Ones  (1)        : " << ones                     << "\n";
-    std::cout << " Zeros (0)        : " << zeros                    << "\n";
+    // 9. Summary
     const std::size_t actual_cap = gen_to_filter.capacity();
     const std::size_t peak       = gen_to_filter.peak_occupancy();
-    std::cout << " Queue capacity   : " << actual_cap
-              << " packets (next pow2 above m/2=" << queue_capacity << ")\n";
-    std::cout << " Peak queue depth : " << peak
-              << " / " << queue_capacity << " (m/2 limit)\n";
-    std::cout << " Memory OK        : "
-              << (peak <= queue_capacity ? "YES" : "NO") << "\n";
-    std::cout << " Shutdown cause   : ";
+
+    std::cout << "\n========================================\n"
+              << " Pipeline Summary\n"
+              << "========================================\n"
+              << " Rows generated   : " << generator.rows_emitted()   << "\n"
+              << " Packets dropped  : " << generator.dropped_packets();
+    if (generator.dropped_packets() > 0)
+        std::cout << "  <- T too tight for queue throughput";
+    std::cout << "\n"
+              << " Output packets   : " << total_packets        << "\n"
+              << " Output pixels    : " << total_packets * 2    << "\n"
+              << " Ones  (1)        : " << ones                 << "\n"
+              << " Zeros (0)        : " << zeros                << "\n"
+              << " Queue capacity   : " << actual_cap
+              << "  (next pow2 above m/2=" << q_hint << ")\n"
+              << " Peak queue depth : " << peak << " / " << q_hint << "\n"
+              << " Memory OK        : " << (peak <= q_hint ? "YES" : "NO") << "\n"
+              << " Shutdown cause   : ";
+
     if (g_shutdown_requested.load())
         std::cout << "signal (SIGINT/SIGTERM)\n";
     else if (config.run_duration_ms > 0 &&
              std::chrono::steady_clock::now() >= deadline)
         std::cout << "duration limit reached\n";
     else
-        std::cout << "natural / max_rows\n";
+        std::cout << "source exhausted / max_rows\n";
+
     std::cout << "========================================\n";
 
     return EXIT_SUCCESS;
