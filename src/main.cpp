@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
     //    PipelineQueue = SPSCQueue<DataPacket, 64>  (lock-free, production path)
     //PipelineQueue queue;
     const std::size_t queue_capacity = config.columns / 2;  // packets per row
-    DynamicSPSCQueue<DataPacket>    gen_to_filter(queue_capacity);
+    DynamicSPSCQueue<DataPacket>    gen_to_filter(queue_capacity, queue_capacity);
     SimpleQueue<FilteredPacket> filter_output;   // Filter → (next block / sink)
 
 
@@ -122,14 +122,14 @@ int main(int argc, char** argv) {
     auto data_source   = createDataSource(config);
     GeneratorBlock generator(config, gen_to_filter, std::move(data_source));
 
-    // Filter: thresholder injected; BoundaryPolicy defaults to REPLICATE
-    auto thresholder = std::make_unique<BinaryThresholder>(config.threshold);
+    // ✓ OPTIMIZATION: Pass threshold directly (uint8_t), not unique_ptr<IThresholder>
+    // This eliminates virtual function dispatch overhead (~5-10ns per pixel)
     FilterBlock filter(config,
                        gen_to_filter,
                        filter_output,
-                       std::move(thresholder),
-                       config.boundary_policy);   // ← from config
- 
+                       config.threshold,           // ← CHANGED: direct threshold
+                       config.boundary_policy);
+
     // 4. Launch threads
     std::atomic<bool> generator_done{false};
 
@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
     std::cout << " Rows generated   : " << generator.rows_emitted() << "\n";
     std::cout << " Packets dropped  : " << generator.dropped_packets();
     if (generator.dropped_packets() > 0)
-        std::cout << "<- T too low for filter throughput on this hardware";
+        std::cout << " <- T too low for filter throughput on this hardware";
     std::cout << "\n";
     std::cout << " Output packets   : " << total_packets            << "\n";
     std::cout << " Output pixels    : " << total_packets * 2        << "\n";

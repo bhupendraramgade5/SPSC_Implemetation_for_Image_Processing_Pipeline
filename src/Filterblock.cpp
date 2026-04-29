@@ -12,12 +12,12 @@
 FilterBlock::FilterBlock(const SystemConfig&           config,
                          IQueue<DataPacket>&           in_queue,
                          IQueue<FilteredPacket>&       out_queue,
-                         std::unique_ptr<IThresholder> thresholder,
+                         uint8_t                   threshold,
                          BoundaryPolicy                policy)
     : config_(config)
     , in_queue_(in_queue)
     , out_queue_(out_queue)
-    , thresholder_(std::move(thresholder))
+    , threshold_(static_cast<float>(threshold))
     , policy_(policy)
     , window_(config.kernel.size())           // ring buffer sized from kernel
     , half_width_(config.kernel.size() / 2)
@@ -26,8 +26,6 @@ FilterBlock::FilterBlock(const SystemConfig&           config,
         throw std::invalid_argument("FilterBlock: kernel must not be empty");
     if (config.kernel.size() % 2 == 0)
         throw std::invalid_argument("FilterBlock: kernel size must be odd");
-    if (!thresholder_)
-        throw std::invalid_argument("FilterBlock: thresholder must not be null");
 }
 void FilterBlock::stop() {
     running_.store(false, std::memory_order_relaxed);
@@ -91,7 +89,9 @@ bool FilterBlock::processSample(uint8_t value, uint64_t row, uint64_t col) {
     const WindowSlot& centre = window_.centre();
 
     float filtered = dotProduct();
-    uint8_t binary = thresholder_->apply(filtered);
+    
+    // ✓ OPTIMIZATION 1: Direct comparison, no virtual dispatch
+    uint8_t binary = (filtered >= threshold_) ? uint8_t{1} : uint8_t{0};
 
     if (!pending_.has_b1) {
         pending_.b1     = binary;
@@ -137,6 +137,22 @@ float FilterBlock::dotProduct() const {
     const auto& kernel = config_.kernel;
     const size_t n     = kernel.size();
 
+    // ✓ OPTIMIZATION 2A: Fast path for 9-tap (spec kernel)
+    // Manual unroll: no loop, better instruction pipelining
+    if (n == 9) {
+        return static_cast<float>(window_.at(0).value) * kernel[0]
+             + static_cast<float>(window_.at(1).value) * kernel[1]
+             + static_cast<float>(window_.at(2).value) * kernel[2]
+             + static_cast<float>(window_.at(3).value) * kernel[3]
+             + static_cast<float>(window_.at(4).value) * kernel[4]
+             + static_cast<float>(window_.at(5).value) * kernel[5]
+             + static_cast<float>(window_.at(6).value) * kernel[6]
+             + static_cast<float>(window_.at(7).value) * kernel[7]
+             + static_cast<float>(window_.at(8).value) * kernel[8];
+    }
+
+    // ✓ OPTIMIZATION 2B: Fallback for other kernel sizes (unlikely)
+    // Generic loop: still fast, maintains flexibility
     float sum = 0.0f;
     for (size_t i = 0; i < n; ++i) {
         sum += static_cast<float>(window_.at(i).value) * kernel[i];

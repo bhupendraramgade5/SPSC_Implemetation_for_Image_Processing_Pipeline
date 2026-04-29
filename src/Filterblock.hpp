@@ -22,7 +22,7 @@ public:
     FilterBlock(const SystemConfig&           config,
                 IQueue<DataPacket>&           in_queue,
                 IQueue<FilteredPacket>&       out_queue,
-                std::unique_ptr<IThresholder> thresholder,
+                uint8_t                   threshold,
                 BoundaryPolicy                policy = BoundaryPolicy::REPLICATE);
     void run();
     void stop();
@@ -36,7 +36,8 @@ private:
     const SystemConfig&           config_;
     IQueue<DataPacket>&           in_queue_;
     IQueue<FilteredPacket>&       out_queue_;
-    std::unique_ptr<IThresholder> thresholder_;
+    //std::unique_ptr<IThresholder> thresholder_;
+	 float threshold_; 
     BoundaryPolicy                policy_;
 
     SlidingWindow                 window_;
