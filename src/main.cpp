@@ -92,7 +92,11 @@ int main(int argc, char** argv) {
 
     SetProcessAffinityMask(GetCurrentProcess(), 3);
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+
+    
     installSignalHandlers();
+
+
     // 1. Load configuration
     // -------------------------------------------------------------------------
     SystemConfig config;

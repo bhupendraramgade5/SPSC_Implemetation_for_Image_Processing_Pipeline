@@ -67,9 +67,24 @@ add_executable(test_generator
     ${CYNLR_HEADERS}
 )
 
+# Filter test executable
+add_executable(test_filter
+    TestFilter.cpp
+    ${CYNLR_SOURCES}
+    ${CYNLR_HEADERS}
+)
+
 # TODO: Add tests and install targets if needed.
 target_include_directories(test_generator PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_generator PRIVATE cynlr_compiler_options)
+
+target_include_directories(test_filter PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_filter PRIVATE cynlr_compiler_options)
+ 
+ 
+if(WIN32)
+    target_link_libraries(test_filter PRIVATE winmm)
+endif()
 
 # Register with CTest so "cmake --build . --target RUN_TESTS" works from VS.
 if(WIN32)
@@ -80,12 +95,36 @@ set_property(TARGET test_generator PROPERTY CXX_STANDARD          17)
 set_property(TARGET test_generator PROPERTY CXX_STANDARD_REQUIRED  ON)
 set_property(TARGET test_generator PROPERTY CXX_EXTENSIONS         OFF)
 
+
+set_property(TARGET test_filter PROPERTY CXX_STANDARD          17)
+set_property(TARGET test_filter PROPERTY CXX_STANDARD_REQUIRED  ON)
+set_property(TARGET test_filter PROPERTY CXX_EXTENSIONS         OFF)
+ 
+
+
 set_target_properties(test_generator PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
+set_target_properties(test_filter PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
 enable_testing()
 # add_test(NAME GeneratorBlockTests COMMAND test_generator)
+
+if(CYNLR_USE_GTEST)
+    target_link_libraries(test_filter PRIVATE gtest_main)
+    include(GoogleTest)
+    gtest_discover_tests(test_filter)
+else()
+    add_test(
+      NAME    FilterBlock_Tests
+      COMMAND test_filter
+    )
+    set_tests_properties(FilterBlock_Tests PROPERTIES
+      FAIL_REGULAR_EXPRESSION "\\[FAIL\\]"
+    )
+endif()
 
 if(CYNLR_USE_GTEST)
     target_link_libraries(test_generator PRIVATE gtest_main)

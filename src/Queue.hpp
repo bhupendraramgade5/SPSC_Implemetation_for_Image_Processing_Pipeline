@@ -166,31 +166,37 @@ class DynamicSPSCQueue : public IQueue<T> {
     static constexpr std::size_t CACHE_LINE = 64;
 
 public:
-    explicit DynamicSPSCQueue(std::size_t capacity_hint)
+    explicit DynamicSPSCQueue(std::size_t capacity_hint, std::size_t logical_max_capacity = 0)
         : capacity_(nextPow2(std::max(capacity_hint, std::size_t{2})))
         , mask_(capacity_ - 1)
         , buffer_(capacity_)
         , head_(0)
         , tail_(0)
         , peak_occupancy_(0)
+        ,logical_max_capacity_(logical_max_capacity > 0 ? logical_max_capacity : capacity_hint)
     {}
 
     bool push(const T& item) override {
         const std::size_t head      = head_.load(std::memory_order_relaxed);
         const std::size_t next_head = head + 1;
+        const std::size_t tail      = tail_.load(std::memory_order_acquire);
 
-        if ((next_head - tail_.load(std::memory_order_acquire)) > mask_)
-            return false;   // full — caller must retry or handle back-pressure
+        // Check if ring buffer would be full
+        if ((next_head - tail) > mask_)
+            return false;   // ring buffer full
+
+        // Check if logical capacity would be exceeded
+        const std::size_t occupancy = next_head - tail;
+        if (logical_max_capacity_ > 0 && occupancy > logical_max_capacity_)
+            return false;   // back-pressure: queue at logical limit
 
         buffer_[head & mask_] = item;
         head_.store(next_head, std::memory_order_release);
-        const std::size_t current =
-            next_head - tail_.load(std::memory_order_relaxed);
 
         std::size_t prev = peak_occupancy_.load(std::memory_order_relaxed);
-        while (current > prev) {
+        while (occupancy > prev) {
             if (peak_occupancy_.compare_exchange_weak(
-                    prev, current, std::memory_order_relaxed)) {
+                    prev, occupancy, std::memory_order_relaxed)) {
                 break;  // successfully stored new peak
             }
             // prev updated by CAS on failure; loop re-checks condition
@@ -244,6 +250,7 @@ private:
     alignas(CACHE_LINE) std::atomic<std::size_t> head_;
     alignas(CACHE_LINE) std::atomic<std::size_t> tail_;
     alignas(CACHE_LINE) std::atomic<std::size_t> peak_occupancy_;
+    const std::size_t logical_max_capacity_;
 };
 #ifdef _MSC_VER
 #pragma warning(pop)
