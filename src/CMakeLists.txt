@@ -1,9 +1,9 @@
-﻿# CMakeList.txt : CMake project for CynLr, include source and define
+﻿# CMakeList.txt : CMake project for CynLr_multiThread, include source and define
 # project specific logic here.
 #
 
 # Add source to this project's executable.
-# add_executable (CynLr "CynLr.cpp" )
+# add_executable (CynLr_multiThread "CynLr_multiThread.cpp" )
 
 # Added new 
 set(CYNLR_SOURCES
@@ -25,38 +25,38 @@ set(CYNLR_HEADERS
 )
 
 # Commented for more flexible source/header management, and to avoid listing headers in the executable target.
-# add_executable(CynLr
+# add_executable(CynLr_multiThread
 #     main.cpp
 #     ConfigManager.cpp
 #     GeneratorBlock.cpp
 # )
 
-add_executable(CynLr
+add_executable(CynLr_multiThread
     main.cpp
     ${CYNLR_SOURCES}
     ${CYNLR_HEADERS}   # Listed so VS Solution Explorer shows them in the IDE
 )
 
-target_include_directories(CynLr
+target_include_directories(CynLr_multiThread
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(CynLr
+target_link_libraries(CynLr_multiThread
     PRIVATE
         cynlr_compiler_options
 )
 
 
 if(WIN32)
-    target_link_libraries(CynLr PRIVATE winmm)
+    target_link_libraries(CynLr_multiThread PRIVATE winmm)
 endif()
 
-set_property(TARGET CynLr PROPERTY CXX_STANDARD          17)
-set_property(TARGET CynLr PROPERTY CXX_STANDARD_REQUIRED  ON)
-set_property(TARGET CynLr PROPERTY CXX_EXTENSIONS         OFF)
+set_property(TARGET CynLr_multiThread PROPERTY CXX_STANDARD          17)
+set_property(TARGET CynLr_multiThread PROPERTY CXX_STANDARD_REQUIRED  ON)
+set_property(TARGET CynLr_multiThread PROPERTY CXX_EXTENSIONS         OFF)
 
-set_target_properties(CynLr PROPERTIES
+set_target_properties(CynLr_multiThread PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -141,3 +141,31 @@ else()
       FAIL_REGULAR_EXPRESSION "\\[FAIL\\]"
     )
 endif()
+
+
+add_executable(CynLr_Linear
+    main_linear.cpp
+    ${CYNLR_SOURCES}
+    ${CYNLR_HEADERS}
+)
+ 
+target_include_directories(CynLr_Linear
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+)
+ 
+target_link_libraries(CynLr_Linear
+    PRIVATE cynlr_compiler_options
+)
+ 
+if(WIN32)
+    target_link_libraries(CynLr_Linear PRIVATE winmm)
+endif()
+ 
+set_property(TARGET CynLr_Linear PROPERTY CXX_STANDARD          17)
+set_property(TARGET CynLr_Linear PROPERTY CXX_STANDARD_REQUIRED  ON)
+set_property(TARGET CynLr_Linear PROPERTY CXX_EXTENSIONS         OFF)
+ 
+set_target_properties(CynLr_Linear PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+ 

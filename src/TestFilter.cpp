@@ -209,8 +209,7 @@ static std::vector<FilteredPacket> runFilter(
     }
 
     // --- Construct and run filter --------------------------------------------
-    auto thresholder = std::make_unique<BinaryThresholder>(cfg.threshold);
-    FilterBlock filter(cfg, in_q, out_q, std::move(thresholder), policy);
+    FilterBlock filter(cfg, in_q, out_q, cfg.threshold, policy);
 
     // Filter runs until queue is empty and stop() is called.
     // We call stop() first so it exits after draining.
@@ -402,8 +401,7 @@ TEST(filter_empty_kernel_throws) {
     SimpleQueue<FilteredPacket> out_q;
 
     ASSERT_THROWS(
-        FilterBlock(cfg, in_q, out_q,
-                    std::make_unique<BinaryThresholder>(static_cast<uint8_t>(128))),
+        FilterBlock(cfg, in_q, out_q, static_cast<uint8_t>(128)),
         std::invalid_argument
     );
 }
@@ -414,21 +412,23 @@ TEST(filter_even_kernel_size_throws) {
     SimpleQueue<FilteredPacket> out_q;
 
     ASSERT_THROWS(
-        FilterBlock(cfg, in_q, out_q,
-                    std::make_unique<BinaryThresholder>(static_cast<uint8_t>(128))),
+        FilterBlock(cfg, in_q, out_q, static_cast<uint8_t>(128)),
         std::invalid_argument
     );
 }
 
-TEST(filter_null_thresholder_throws) {
-    SystemConfig cfg = filterConfig(4, 128, identityKernel());
+TEST(filter_zero_threshold_all_ones) {
+    // With threshold=0, all filtered values >= 0, so output is always 1.
+    SystemConfig cfg = filterConfig(4, 0, identityKernel());
     SimpleQueue<DataPacket>     in_q;
     SimpleQueue<FilteredPacket> out_q;
 
-    ASSERT_THROWS(
-        FilterBlock(cfg, in_q, out_q, nullptr),
-        std::invalid_argument
-    );
+    std::vector<uint8_t> raw = { 0, 0, 0, 0 };
+    auto results = runFilter(cfg, raw);
+    // Threshold=0: even 0.0f >= 0.0f is true -> all 1s
+    ASSERT_EQ(results.size(), size_t(2));
+    ASSERT_EQ(results[0].b1, uint8_t(1));
+    ASSERT_EQ(results[0].b2, uint8_t(1));
 }
 
 
@@ -767,9 +767,8 @@ TEST(filter_threaded_csv_end_to_end) {
     auto source = createDataSource(cfg);
     GeneratorBlock generator(cfg, gen_to_filter, std::move(source));
 
-    auto thresholder = std::make_unique<BinaryThresholder>(static_cast<uint8_t>(TV));
     FilterBlock filter(cfg, gen_to_filter, filter_out,
-                       std::move(thresholder), BoundaryPolicy::ZERO_PAD);
+                       static_cast<uint8_t>(TV), BoundaryPolicy::ZERO_PAD);
 
     // Run generator — CSV will exhaust and return.
     std::thread gen_t([&]{ generator.run(); });
@@ -823,9 +822,8 @@ TEST(filter_threaded_random_does_not_crash) {
     auto source = createDataSource(cfg);
     GeneratorBlock generator(cfg, gen_to_filter, std::move(source));
 
-    auto thresholder = std::make_unique<BinaryThresholder>(static_cast<uint8_t>(128));
     FilterBlock filter(cfg, gen_to_filter, filter_out,
-                       std::move(thresholder), BoundaryPolicy::REPLICATE);
+                       static_cast<uint8_t>(128), BoundaryPolicy::REPLICATE);
 
     std::thread gen_t([&]{ generator.run(); });
     std::thread flt_t([&]{ filter.run(); });
