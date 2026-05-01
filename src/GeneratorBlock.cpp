@@ -64,7 +64,7 @@ static constexpr uint64_t SPIN_THRESHOLD_NS = 1'000'000ULL;
 std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
     if (config.mode == Mode::CSV) {
         return std::make_unique<CSVDataSource>(
-            config.input_file, config.columns, config.csv_mismatch_policy);
+            config.input_file, config.csv_mismatch_policy);
     }
     return std::make_unique<RandomDataSource>(config.columns);
 }
@@ -142,32 +142,44 @@ void RandomDataSource::advance() {
 //   col_ tracks the column of v1 within the current row.
 // ============================================================================
 CSVDataSource::CSVDataSource(const std::string& file,
-                             size_t             columns,
                              CSVMismatchPolicy  mismatch_policy)
-    : file_(file), columns_(columns), mismatch_policy_(mismatch_policy)
+    : file_(file), columns_(0), mismatch_policy_(mismatch_policy)
 {
     if (!file_.is_open())
         throw std::runtime_error(
             "CSVDataSource: cannot open file '" + file + "'");
 
-    // Auto-detect columns from first row if not specified (columns == 0)
-    if (columns_ == 0) {
-        std::string line;
-        if (std::getline(file_, line)) {
-            std::stringstream ss(line);
-            std::string val;
-            size_t count = 0;
-            while (std::getline(ss, val, ',')) count++;
-            columns_ = count;
-            std::cout << "[CSVDataSource] Auto-detected columns from file: "
-                      << columns_ << "\n";
-            // Seek back to start so the first row is re-read by loadNextRow()
-            file_.seekg(0);
+    // Always auto-detect columns from first row — file is the source of truth.
+    std::string line;
+    if (std::getline(file_, line)) {
+        std::stringstream ss(line);
+        std::string val;
+        size_t count = 0;
+        while (std::getline(ss, val, ',')) {
+            const auto first = val.find_first_not_of(" \t\r\n");
+            if (first != std::string::npos) ++count;
         }
+        columns_ = count;
     }
 
     if (columns_ == 0)
-        throw std::invalid_argument("CSVDataSource: columns must be > 0");
+        throw std::runtime_error(
+            "CSVDataSource: file is empty or first row has no values");
+
+    // Pipeline contract: columns must be even (2 pixels per packet).
+    // Truncate silently if odd — warn the user.
+    if (columns_ % 2 != 0) {
+        std::cerr << "[CSVDataSource] Warning: detected " << columns_
+                  << " columns (odd) — truncating to " << (columns_ - 1)
+                  << " to satisfy 2-pixels-per-packet contract.\n";
+        --columns_;
+    }
+
+    std::cout << "[CSVDataSource] Auto-detected columns from file: "
+              << columns_ << "\n";
+
+    // Rewind so loadNextRow() re-reads from row 0.
+    file_.seekg(0);
 }
 
 // Returns the next pair of pixels from the buffer, loading a new CSV row
@@ -231,7 +243,8 @@ bool CSVDataSource::loadNextRow() {
                 } else {
                     std::cerr << "[CSVDataSource] Warning: row " << row_
                               << " has only " << actual
-                              << " values, row skipped (TRUNCATE).\n";
+                              << " values (expected " << columns_
+                              << "), row skipped (TRUNCATE).\n";
                     buffer_.clear();
                 }
                 break;
@@ -250,9 +263,21 @@ bool CSVDataSource::loadNextRow() {
         }
     }
 
+    // --- Odd column count after mismatch resolution ------------------------
+    // Pipeline always emits 2 pixels per packet — a trailing unpaired pixel
+    // has no valid partner and must be dropped.
+    if (buffer_.size() % 2 != 0) {
+        std::cerr << "[CSVDataSource] Warning: row " << row_
+                  << " has odd column count (" << buffer_.size()
+                  << ") after policy application — dropping last pixel.\n";
+        buffer_.pop_back();
+    }
+
     row_++;
     col_ = 0;
-    return true;
+
+    // Return false if the row ended up empty (e.g. TRUNCATE on a short row).
+    return !buffer_.empty();
 }
 
 // Advances col_ by 2 within the current row.

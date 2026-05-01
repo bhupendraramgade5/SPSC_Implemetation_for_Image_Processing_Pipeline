@@ -126,6 +126,20 @@ int main(int argc, char** argv) {
 
     // Generator: owns its data source (CSV or random), injected via factory
     auto data_source   = createDataSource(config);
+    
+    if (config.mode == Mode::CSV && config.columns == 0) {
+    config.columns = data_source->detectedColumns();
+    std::cout << "[Main] CSV auto-detected columns: " << config.columns << "\n";
+
+    // Now validate what we deferred
+    if (config.columns < 2)
+        throw std::runtime_error("CSV file has < 2 columns");
+    if (config.columns % 2 != 0) {
+        std::cout << "[Main] Warning: CSV columns=" << config.columns
+                  << " is odd — truncating to " << (config.columns - 1) << "\n";
+        config.columns--;
+    }
+}
     GeneratorBlock generator(config, gen_to_filter, std::move(data_source));
 
 

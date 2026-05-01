@@ -1,5 +1,10 @@
 ## SUMMARY
 The system is designed as a time-constrained asynchronous pipeline using SPSC (Single Producer Single Consumer) queues for inter-block communication. Each block operates independently while maintaining strict data ordering and bounded latency (≤ T).
+
+## Executive Summary
+
+A fully functional two-stage pipeline (Data Generation + Filter & Threshold) is implemented in C++17 with both threaded and single-threaded variants. The architecture prioritises modularity, testability, and extensibility for future  pipeline stages over raw throughput — a deliberate tradeoff documented in PERFORMANCE_ANALYSIS.md. The pipeline meets all functional requirements and the memory constraint (queue depth ≤ m). Throughput at T=1000ns is limited by OS scheduling non-determinism and virtual dispatch overhead inherent to the extensible design; the specific bottlenecks and the path to resolving them are analysed in detail in PERFORMANCE_ANALYSIS.md.
+
 ## DATA FLOW DIAGRAM
 ```
                 ┌──────────────────────┐

@@ -143,21 +143,20 @@ void ConfigManager::validate(SystemConfig& config) {
     // }
 
     // If CSV mode, columns=0 is OK — CSVDataSource will auto-detect from file
-    if (config.columns == 0 && config.mode != Mode::CSV) {
-        throw std::runtime_error("Invalid config: columns (m) must be > 0");
-    }
-    
-    if (config.columns < 2) {
-        throw std::runtime_error(
-            "Invalid config: columns (m) must be >= 2 "
-            "(pipeline outputs 2 consecutive pixels per cycle)");
-    }
 
-    if (config.columns % 2 != 0) {
-        throw std::runtime_error(
-            "Invalid config: columns (m) must be even "
-            "(pipeline outputs 2 consecutive pixels per cycle, got m="
-            + std::to_string(config.columns) + ")");
+    if (config.mode != Mode::CSV) {
+        if (config.columns == 0) {
+            throw std::runtime_error("Invalid config: columns (m) must be > 0");
+        }
+        if (config.columns < 2) {
+            throw std::runtime_error(
+                "Invalid config: columns (m) must be >= 2");
+        }
+        if (config.columns % 2 != 0) {
+            throw std::runtime_error(
+                "Invalid config: columns (m) must be even, got m="
+                + std::to_string(config.columns));
+        }
     }
 
     if (config.cycle_time_ns == 0) {
@@ -176,6 +175,8 @@ void ConfigManager::validate(SystemConfig& config) {
         throw std::runtime_error(
             "Invalid config: CSV mode requires input_file to be set");
     }
+
+    
 
     // run_duration_ms / max_rows: 0 = unlimited; any non-negative value OK.
 }

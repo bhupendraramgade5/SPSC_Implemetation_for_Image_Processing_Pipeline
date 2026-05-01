@@ -429,7 +429,7 @@ TEST(random_produces_varied_values) {
 
 TEST(csv_basic_two_rows_four_columns) {
     const auto path = writeTempCSV("10,20,30,40\n50,60,70,80\n");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -453,7 +453,7 @@ TEST(csv_basic_two_rows_four_columns) {
 
 TEST(csv_returns_false_at_eof_and_stays_false) {
     const auto path = writeTempCSV("1,2,3,4\n");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -465,7 +465,7 @@ TEST(csv_returns_false_at_eof_and_stays_false) {
 
 TEST(csv_whitespace_around_commas) {
     const auto path = writeTempCSV("  5 , 10 , 15 , 20 \n");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -479,7 +479,7 @@ TEST(csv_whitespace_around_commas) {
 TEST(csv_boundary_values_0_and_255) {
     
     const auto path = writeTempCSV("0,255,0,255\n");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
 
     DataPacket pkt{};
     ASSERT_TRUE(src.next(pkt));
@@ -494,7 +494,7 @@ TEST(csv_boundary_values_0_and_255) {
 TEST(csv_row_index_increments_once_per_line) {
     // row_ must increment exactly once per CSV line — not once per packet.
     const auto path = writeTempCSV("1,2,3,4\n5,6,7,8\n9,10,11,12\n");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
 
     DataPacket pkt{};
     for (uint64_t r = 0; r < 3; ++r) {
@@ -510,7 +510,7 @@ TEST(csv_row_index_increments_once_per_line) {
 TEST(csv_no_trailing_newline) {
     // Many real CSV files don't end with \n — must still be parsed correctly.
     const auto path = writeTempCSV("10,20,30,40");   // no \n at end
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -528,7 +528,7 @@ TEST(csv_crlf_line_endings) {
     // Windows line endings (\r\n) — the \r must be stripped by the parser.
     const auto path = writeTempCSV("10,20,30,40\r\n50,60,70,80\r\n",
                                     "cynlr_crlf.csv");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -548,14 +548,14 @@ TEST(csv_crlf_line_endings) {
 
 TEST(csv_empty_file_returns_false_immediately) {
     const auto path = writeTempCSV("", "cynlr_empty.csv");
-    CSVDataSource src(path, 4);
+    CSVDataSource src(path);;
     DataPacket pkt{};
     ASSERT_FALSE(src.next(pkt));
 }
 
 TEST(csv_single_row_two_columns_minimum) {
     const auto path = writeTempCSV("100,200\n");
-    CSVDataSource src(path, 2);
+    CSVDataSource src(path);;
     DataPacket pkt{};
 
     ASSERT_TRUE(src.next(pkt));
@@ -569,21 +569,21 @@ TEST(csv_single_row_two_columns_minimum) {
 
 TEST(csv_bad_file_path_throws) {
     ASSERT_THROWS(
-        CSVDataSource("/nonexistent/path/no_such_file.csv", 4),
+        CSVDataSource("/nonexistent/path/no_such_file.csv"),
         std::runtime_error
     );
 }
-
 TEST(csv_zero_columns_throws) {
-    const auto path = writeTempCSV("1,2,3,4\n");
-    ASSERT_THROWS(CSVDataSource(path, 0), std::invalid_argument);
+    // Columns are now auto-detected — zero columns is impossible unless
+    // the file is empty, which throws runtime_error instead.
+    const auto path = writeTempCSV("", "cynlr_empty2.csv");
+    ASSERT_THROWS(CSVDataSource(path), std::runtime_error);
 }
-
 TEST(csv_single_row_two_columns) {
     
 
     const auto path = writeTempCSV("100,200\n");
-    CSVDataSource src(path, 2);
+    CSVDataSource src(path);
 
     DataPacket pkt{};
     ASSERT_TRUE(src.next(pkt));
@@ -607,7 +607,7 @@ TEST(csv_large_grid_exhaustive_verification) {
         ss << '\n';
     }
     const auto path = writeTempCSV(ss.str(), "cynlr_large.csv");
-    CSVDataSource src(path, COLS);
+    CSVDataSource src(path);
 
     DataPacket pkt{};
     for (size_t r = 0; r < ROWS; ++r) {

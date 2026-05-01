@@ -29,6 +29,7 @@ public:
     explicit RandomDataSource(size_t columns);
 
     bool next(DataPacket& packet) override;
+    size_t detectedColumns() const override { return columns_; }
 
 private:
     void advance();
@@ -45,12 +46,12 @@ private:
 
 class CSVDataSource : public IDataSource {
 public:
-    CSVDataSource(const std::string& file, 
-	size_t columns,
+    CSVDataSource(const std::string& file,
                   CSVMismatchPolicy  mismatch_policy = CSVMismatchPolicy::REJECT);
 
     bool next(DataPacket& packet) override;
 
+    size_t detectedColumns() const override { return columns_; }
 private:
     bool loadNextRow();
     // void advance(); // Changing name here definition
@@ -60,9 +61,9 @@ private:
     std::ifstream file_;
     std::deque<uint8_t> buffer_;
 
-    size_t columns_;
-    uint64_t row_ = 0;
-    uint64_t col_ = 0;
+    size_t            columns_ = 0;
+    uint64_t          row_     = 0;
+    uint64_t          col_     = 0;
     CSVMismatchPolicy mismatch_policy_;
 };
 

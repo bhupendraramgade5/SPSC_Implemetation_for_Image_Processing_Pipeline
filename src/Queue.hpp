@@ -50,6 +50,7 @@ static_assert(std::is_trivially_copyable<DataPacket>::value,
 class IDataSource {
 public:
     virtual bool next(DataPacket& packet) = 0;
+    virtual size_t detectedColumns() const { return 0; }
     virtual ~IDataSource() = default;
 };
 // ============================================================================

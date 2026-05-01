@@ -23,16 +23,17 @@
 #include <csignal>
 #include <atomic>
 
-// #define NOMINMAX
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 #include "ConfigManager.hpp"
 #include "GeneratorBlock.hpp"   // IDataSource, createDataSource
-#include "FilterUtils.hpp"      // SlidingWindow, BinaryThresholder, FilteredPacket
+#include "FilterUtils.hpp"      // SlidingWindow, FilteredPacket, applyLeft, applyRight
 #include "Queue.hpp"            // DataPacket
 #include "OutputWriter.hpp"     // IOutputWriter, makeOutputWriter
-#include "PerfTest.hpp"
-#include "Filterblock.hpp"
+#include "PerfTest.hpp"         // LinearStats, computeLinearStats, printLinearStats
 
 // ============================================================================
 // Signal handling (Ctrl+C to stop)
@@ -46,6 +47,127 @@ extern "C" void signalHandler(int) {
 // ============================================================================
 // Inline Filter: No queue, no virtual dispatch, hardcoded 9-tap + fallback
 // ============================================================================
+
+class InlineLinearFilter {
+public:
+    explicit InlineLinearFilter(const SystemConfig& cfg)
+        : cfg_(cfg)
+        , threshold_(static_cast<float>(cfg.threshold))
+        , window_(cfg.kernel.size())
+        , half_width_(cfg.kernel.size() / 2)
+        , policy_(cfg.boundary_policy)
+    {
+        if (cfg.kernel.empty())
+            throw std::invalid_argument("InlineLinearFilter: empty kernel");
+        if (cfg.kernel.size() % 2 == 0)
+            throw std::invalid_argument("InlineLinearFilter: kernel size must be odd");
+    }
+
+    // Called once at the start of each new scan row.
+    // Resets the sliding window and applies left-padding.
+    void beginRow(uint8_t left_edge, uint64_t row) {
+        current_row_ = row;
+        window_.reset();
+        pending_ = PendingOutput{};
+
+        for (size_t i = 0; i < half_width_; ++i) {
+            uint8_t pad = applyLeft(policy_, left_edge, half_width_ - i);
+            window_.push(pad, row, 0);
+        }
+    }
+
+    // Process one pixel.
+    // Returns true and fills fp when a complete pair (b1, b2) is ready.
+    // Returns false while the window is filling or only b1 is staged.
+    bool processSample(uint8_t value, uint64_t row, uint64_t col,
+                       FilteredPacket& fp)
+    {
+        window_.push(value, row, col);
+
+        if (!window_.is_full()) return false;
+
+        const WindowSlot& c      = window_.centre();
+        const float       fval   = dotProduct();
+        const uint8_t     binary = (fval >= threshold_) ? uint8_t{1} : uint8_t{0};
+
+        if (!pending_.has_b1) {
+            pending_.b1     = binary;
+            pending_.row    = c.row;
+            pending_.col    = c.col;
+            pending_.has_b1 = true;
+            return false;
+        }
+
+        fp.b1  = pending_.b1;
+        fp.b2  = binary;
+        fp.row = pending_.row;
+        fp.col = pending_.col;
+        pending_ = PendingOutput{};
+        return true;
+    }
+
+    // Right-pad at end of row and drain any unpaired b1.
+    void flush(uint8_t edge, uint64_t row, uint64_t last_col,
+               std::vector<FilteredPacket>& out)
+    {
+        for (size_t i = 0; i < half_width_; ++i) {
+            uint8_t pad = applyRight(policy_, edge, i + 1);
+            FilteredPacket fp;
+            if (processSample(pad, row, last_col + 1 + i, fp))
+                out.push_back(fp);
+        }
+
+        if (pending_.has_b1 && !pending_.has_b2) {
+            FilteredPacket fp;
+            fp.b1  = pending_.b1;
+            fp.b2  = 0;
+            fp.row = pending_.row;
+            fp.col = pending_.col;
+            out.push_back(fp);
+            pending_ = PendingOutput{};
+        }
+    }
+
+private:
+    // 9-tap unrolled fast path — no loop, no branch, compiler schedules
+    // these as independent multiply-accumulate chains.
+    // Generic fallback for non-standard kernel sizes.
+    float dotProduct() const {
+        const auto& k = cfg_.kernel;
+        if (k.size() == 9) {
+            return static_cast<float>(window_.at(0).value) * k[0]
+                 + static_cast<float>(window_.at(1).value) * k[1]
+                 + static_cast<float>(window_.at(2).value) * k[2]
+                 + static_cast<float>(window_.at(3).value) * k[3]
+                 + static_cast<float>(window_.at(4).value) * k[4]
+                 + static_cast<float>(window_.at(5).value) * k[5]
+                 + static_cast<float>(window_.at(6).value) * k[6]
+                 + static_cast<float>(window_.at(7).value) * k[7]
+                 + static_cast<float>(window_.at(8).value) * k[8];
+        }
+        float s = 0.f;
+        for (size_t i = 0; i < k.size(); ++i)
+            s += static_cast<float>(window_.at(i).value) * k[i];
+        return s;
+    }
+
+    const SystemConfig& cfg_;
+    float               threshold_;
+    SlidingWindow       window_;
+    const size_t        half_width_;
+    BoundaryPolicy      policy_;
+    uint64_t            current_row_ = UINT64_MAX;
+
+    struct PendingOutput {
+        bool     has_b1 = false;
+        bool     has_b2 = false;
+        uint8_t  b1     = 0;
+        uint8_t  b2     = 0;
+        uint64_t row    = 0;
+        uint64_t col    = 0;
+    } pending_;
+};
+
 
 // ============================================================================
 // Main
@@ -63,10 +185,18 @@ int main(int argc, char** argv) {
     // 1. Config
     // -------------------------------------------------------------------------
     SystemConfig config;
-    try { config = ConfigManager::load(argc, argv); }
-    catch (const std::exception& ex) {
+    try {
+        config = ConfigManager::load(argc, argv);
+    } catch (const std::exception& ex) {
         std::cerr << "[ERROR] Config: " << ex.what() << "\n";
         return EXIT_FAILURE;
+    }
+
+    // Sync columns from CSV file if in CSV mode
+    auto source = createDataSource(config);
+    if (config.mode == Mode::CSV) {
+        config.columns = source->detectedColumns();
+        std::cout << "[Main] CSV columns synced: " << config.columns << "\n";
     }
 
     std::cout << "========================================\n"
@@ -92,15 +222,16 @@ int main(int argc, char** argv) {
     // -------------------------------------------------------------------------
     // 2. Build data source and filter
     // -------------------------------------------------------------------------
-    auto source = createDataSource(config);
-    LinearFilter filter(config);
-    auto   writer = makeOutputWriter(config);   // <-- OutputWriter adapter
+    InlineLinearFilter filter(config);
+    auto         writer = makeOutputWriter(config);
 
     // 3. Timing & stats storage
     std::vector<uint64_t> pixel_timestamps;
     pixel_timestamps.reserve(2'000'000);
 
-    size_t   total_pixels = 0, ones = 0, zeros = 0;
+    size_t   total_pixels = 0;
+    size_t   ones         = 0;
+    size_t   zeros        = 0;
     uint64_t rows_done    = 0;
 
     const auto deadline =
@@ -132,8 +263,8 @@ int main(int argc, char** argv) {
                 std::vector<FilteredPacket> flush_out;
                 filter.flush(last_val, prev_row, last_col, flush_out);
                 for (const auto& fp : flush_out) {
-                    writer->write(fp);   // <-- OutputWriter
-                    uint64_t ts = static_cast<uint64_t>(
+                    writer->write(fp);
+                    const uint64_t ts = static_cast<uint64_t>(
                         std::chrono::steady_clock::now().time_since_epoch().count());
                     pixel_timestamps.push_back(ts);
                     pixel_timestamps.push_back(ts);
@@ -151,8 +282,8 @@ int main(int argc, char** argv) {
         FilteredPacket fp;
 
         if (filter.processSample(packet.v1, packet.row, packet.col, fp)) {
-            writer->write(fp);   // <-- OutputWriter
-            uint64_t ts = static_cast<uint64_t>(
+            writer->write(fp);
+            const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
@@ -163,8 +294,8 @@ int main(int argc, char** argv) {
 
         // --- Filter pixel 2 --------------------------------------------------
         if (filter.processSample(packet.v2, packet.row, packet.col + 1, fp)) {
-            writer->write(fp);   // <-- OutputWriter
-            uint64_t ts = static_cast<uint64_t>(
+            writer->write(fp);
+            const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
@@ -182,8 +313,8 @@ int main(int argc, char** argv) {
         std::vector<FilteredPacket> flush_out;
         filter.flush(last_val, prev_row, last_col, flush_out);
         for (const auto& fp : flush_out) {
-            writer->write(fp);   // <-- OutputWriter
-            uint64_t ts = static_cast<uint64_t>(
+            writer->write(fp);
+            const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
@@ -196,36 +327,14 @@ int main(int argc, char** argv) {
 
     writer->finalize();   // flush & close CSV
 
-    // 5. Inter-pixel gap stats
-    std::vector<uint64_t> gaps;
-    gaps.reserve(pixel_timestamps.size());
-    for (size_t i = 1; i < pixel_timestamps.size(); ++i)
-        if (pixel_timestamps[i] >= pixel_timestamps[i - 1])
-            gaps.push_back(pixel_timestamps[i] - pixel_timestamps[i - 1]);
-
-    LinearStats stats = computeLinearStats(gaps);
+    // -------------------------------------------------------------------------
+    // 5. Compute and print stats
+    // -------------------------------------------------------------------------
+    LinearStats stats = computeLinearStats(pixel_timestamps);
+    printLinearStats(stats, config.cycle_time_ns);
 
     // 6. Performance report
     std::cout << "========================================\n"
-              << " Performance Report  (single thread)\n"
-              << "========================================\n"
-              << " Samples      : " << stats.count   << "\n"
-              << " Min gap (ns) : " << stats.min_ns  << "\n"
-              << " Max gap (ns) : " << stats.max_ns  << "\n"
-              << " Avg gap (ns) : " << stats.avg_ns  << "\n"
-              << " P50 gap (ns) : " << stats.p50_ns  << "\n"
-              << " P99 gap (ns) : " << stats.p99_ns  << "\n"
-              << " Requirement  : gap <= T (" << config.cycle_time_ns << " ns)\n";
-
-    if (stats.max_ns <= config.cycle_time_ns)
-        std::cout << " RESULT       : PASS\n";
-    else if (stats.avg_ns <= static_cast<double>(config.cycle_time_ns))
-        std::cout << " RESULT       : AVG PASS / MAX FAIL  (OS jitter)\n";
-    else
-        std::cout << " RESULT       : FAIL\n";
-
-    std::cout << "========================================\n\n"
-              << "========================================\n"
               << " Pipeline Summary  (single thread)\n"
               << "========================================\n"
               << " Rows processed : " << rows_done    << "\n"
@@ -247,25 +356,14 @@ int main(int argc, char** argv) {
 
     // -------------------------------------------------------------------------
     // 7. Comparison hint
-    double threaded_ref = 300.0;
+    //double threaded_ref = 300.0;
     std::cout << "========================================\n"
               << " Interpretation\n"
               << "========================================\n"
               << " Threaded avg gap : ~280-530 ns  (prior runs)\n"
               << " Linear  avg gap  : " << stats.avg_ns << " ns\n\n";
 
-    if (stats.avg_ns < threaded_ref * 0.5)
-        std::cout << " Threading overhead dominates (~"
-                  << static_cast<int>(threaded_ref - stats.avg_ns)
-                  << " ns/pixel from queue + context switch).\n"
-                  << " Algorithm itself is fast. SIMD would help further.\n";
-    else if (stats.avg_ns < threaded_ref * 0.8)
-        std::cout << " Moderate threading overhead (~"
-                  << static_cast<int>(threaded_ref - stats.avg_ns)
-                  << " ns). Both algorithm and threading contribute.\n";
-    else
-        std::cout << " Algorithm cost dominates. Threading overhead is small.\n"
-                  << " To go faster: need SIMD (AVX2) in dotProduct().\n";
+    
 
     std::cout << "========================================\n";
 
