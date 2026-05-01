@@ -21,15 +21,15 @@
 #include <chrono>
 #include <iomanip>
 #include <csignal>
-#define NOMINMAX
+// #define NOMINMAX
 #include <windows.h>
 
 #include "ConfigManager.hpp"
 #include "Queue.hpp"
 #include "GeneratorBlock.hpp"
-#include "FilterBlock.hpp"      // FilterBlock (pulls in FilterUtils.hpp)
-#include "OutputWriter.hpp"   // IOutputWriter, CSVOutputWriter, NullOutputWriter
-#include "PerfTest.hpp"       // performance measurement utilities (optional)
+#include "Filterblock.hpp"    
+#include "OutputWriter.hpp"   
+#include "PerfTest.hpp"       
 //static constexpr uint64_t RUN_DURATION_MS = 200;   
 namespace {
     std::atomic<bool> g_shutdown_requested{false};
@@ -99,12 +99,14 @@ int main(int argc, char** argv) {
     
     installSignalHandlers();
 
-
+    // -------------------------------------------------------------------------
     // 1. Load configuration
     // -------------------------------------------------------------------------
     SystemConfig config;
+    std::cout<<"Loading config..."<<std::endl;
     try {
         config = ConfigManager::load(argc, argv);
+
     } catch (const std::exception& ex) {
         std::cerr << "[ERROR] Config: " << ex.what() << "\n";
         return EXIT_FAILURE;
@@ -112,9 +114,12 @@ int main(int argc, char** argv) {
 
     printConfig(config);
 
+
+    // -------------------------------------------------------------------------
     // 2. Queues
-    const std::size_t q_hint = config.columns / 2;
-    DynamicSPSCQueue<DataPacket>    gen_to_filter(q_hint);
+    // -------------------------------------------------------------------------
+    const std::size_t queue_capacity = config.columns / 2;
+    DynamicSPSCQueue<DataPacket>    gen_to_filter(queue_capacity, queue_capacity);
     SimpleQueue<FilteredPacket>     filter_output;
 
 
@@ -123,18 +128,22 @@ int main(int argc, char** argv) {
     auto data_source   = createDataSource(config);
     GeneratorBlock generator(config, gen_to_filter, std::move(data_source));
 
-    // ✓ OPTIMIZATION: Pass threshold directly (uint8_t), not unique_ptr<IThresholder>
-    // This eliminates virtual function dispatch overhead (~5-10ns per pixel)
+
     FilterBlock filter(config,
                        gen_to_filter,
                        filter_output,
-                       config.threshold,           // ← CHANGED: direct threshold
+                       config.threshold,           
                        config.boundary_policy);
 
+    // -------------------------------------------------------------------------
     // 4. Output writer (adapter – NullOutputWriter if write_output=false)
+    // -------------------------------------------------------------------------
     auto writer = makeOutputWriter(config);
 
+
+    // -------------------------------------------------------------------------
     // 5. Launch threads
+    // -------------------------------------------------------------------------
     std::atomic<bool> gen_done{false};
     std::thread gen_thread(runGenerator, std::ref(generator), std::ref(gen_done));
     std::thread filter_thread(runFilter, std::ref(filter));
@@ -174,10 +183,9 @@ int main(int argc, char** argv) {
     #endif
 
     FilteredPacket fp;
-
+ 
     while (filter_output.pop(fp)) {
-        writer->write(fp);          // <-- OutputWriter adapter
-
+        writer->write(fp);  
         ++total_packets;
         if (fp.b1 == 1) ++ones; else ++zeros;
         if (fp.b2 == 1) ++ones; else ++zeros;
@@ -197,10 +205,11 @@ int main(int argc, char** argv) {
             prev = fp.t2;
         #endif
     }
-    writer->finalize();
 
+    writer->finalize(); 
     // 8. Performance report (only when compiled with CYNLR_PERF_BUILD)
-#ifdef CYNLR_PERF_BUILD
+	#ifdef CYNLR_PERF_BUILD
+	// writer->finalize();
     auto stats = computePerfStats(gaps);
     std::cout << "\n========================================\n"
               << " Performance Report\n"
@@ -233,9 +242,11 @@ int main(int argc, char** argv) {
               << " Ones  (1)        : " << ones                 << "\n"
               << " Zeros (0)        : " << zeros                << "\n"
               << " Queue capacity   : " << actual_cap
-              << "  (next pow2 above m/2=" << q_hint << ")\n"
-              << " Peak queue depth : " << peak << " / " << q_hint << "\n"
-              << " Memory OK        : " << (peak <= q_hint ? "YES" : "NO") << "\n"
+              << " packets (next pow2 above m/2=" << queue_capacity << ")\n"
+              << " Peak queue depth : " << peak
+              << " / " << queue_capacity << " (m/2 limit)\n"
+              << " Memory OK        : "
+              << (peak <= queue_capacity ? "YES" : "NO") << "\n"
               << " Shutdown cause   : ";
 
     if (g_shutdown_requested.load())

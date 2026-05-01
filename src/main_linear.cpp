@@ -23,7 +23,7 @@
 #include <csignal>
 #include <atomic>
 
-#define NOMINMAX
+// #define NOMINMAX
 #include <windows.h>
 
 #include "ConfigManager.hpp"
@@ -31,11 +31,12 @@
 #include "FilterUtils.hpp"      // SlidingWindow, BinaryThresholder, FilteredPacket
 #include "Queue.hpp"            // DataPacket
 #include "OutputWriter.hpp"     // IOutputWriter, makeOutputWriter
+#include "PerfTest.hpp"
+#include "Filterblock.hpp"
 
 // ============================================================================
 // Signal handling (Ctrl+C to stop)
 // ============================================================================
-
 static std::atomic<bool> g_stop{false};
 
 extern "C" void signalHandler(int) {
@@ -45,137 +46,6 @@ extern "C" void signalHandler(int) {
 // ============================================================================
 // Inline Filter: No queue, no virtual dispatch, hardcoded 9-tap + fallback
 // ============================================================================
-
-class LinearFilter {
-public:
-    explicit LinearFilter(const SystemConfig& cfg)
-        : cfg_(cfg)
-        , threshold_(static_cast<float>(cfg.threshold))
-        , window_(cfg.kernel.size())
-        , half_width_(cfg.kernel.size() / 2)
-        , policy_(cfg.boundary_policy)
-    {
-        if (cfg.kernel.empty())        throw std::invalid_argument("LinearFilter: empty kernel");
-        if (cfg.kernel.size() % 2 == 0) throw std::invalid_argument("LinearFilter: kernel size must be odd");
-    }
-
-    // Called once per row start.  Resets the sliding window and left-pads it.
-    void beginRow(uint8_t left_edge, uint64_t row) {
-        current_row_ = row;
-        window_.reset();
-        pending_ = PendingOutput{};
-
-        for (size_t i = 0; i < half_width_; ++i) {
-            uint8_t pad = applyLeft(policy_, left_edge, half_width_ - i);
-            window_.push(pad, row, 0);
-        }
-    }
-
-    // Process one pixel.  Returns true + fills fp when a pair is complete.
-    bool processSample(uint8_t value, uint64_t row, uint64_t col, FilteredPacket& fp) {
-        window_.push(value, row, col);
-
-        if (!window_.is_full()) return false;
-
-        const WindowSlot& c = window_.centre();
-        float filtered = dotProduct();
-        uint8_t binary = (filtered >= threshold_) ? uint8_t{1} : uint8_t{0};
-
-        if (!pending_.has_b1) {
-            pending_.b1 = binary; pending_.row = c.row; pending_.col = c.col;
-            pending_.has_b1 = true;
-            return false;
-        }
-
-        pending_.b2     = binary;
-        fp.b1  = pending_.b1;
-        fp.b2  = binary;
-        fp.row = pending_.row;
-        fp.col = pending_.col;
-        pending_ = PendingOutput{};
-        return true;
-    }
-
-    // Right-pad at end of row; push any leftover partial pair.
-    void flush(uint8_t edge, uint64_t row, uint64_t last_col,
-               std::vector<FilteredPacket>& out)
-    {
-        for (size_t i = 0; i < half_width_; ++i) {
-            uint8_t pad = applyRight(policy_, edge, i + 1);
-            FilteredPacket fp;
-            if (processSample(pad, row, last_col + 1 + i, fp))
-                out.push_back(fp);
-        }
-
-        if (pending_.has_b1 && !pending_.has_b2) {
-            FilteredPacket fp;
-            fp.b1 = pending_.b1; fp.b2 = 0;
-            fp.row = pending_.row; fp.col = pending_.col;
-            out.push_back(fp);
-            pending_ = PendingOutput{};
-        }
-    }
-
-private:
-    float dotProduct() const {
-        const auto& k = cfg_.kernel;
-        if (k.size() == 9)   // fast path: unrolled
-            return static_cast<float>(window_.at(0).value) * k[0]
-                 + static_cast<float>(window_.at(1).value) * k[1]
-                 + static_cast<float>(window_.at(2).value) * k[2]
-                 + static_cast<float>(window_.at(3).value) * k[3]
-                 + static_cast<float>(window_.at(4).value) * k[4]
-                 + static_cast<float>(window_.at(5).value) * k[5]
-                 + static_cast<float>(window_.at(6).value) * k[6]
-                 + static_cast<float>(window_.at(7).value) * k[7]
-                 + static_cast<float>(window_.at(8).value) * k[8];
-        float s = 0.f;
-        for (size_t i = 0; i < k.size(); ++i)
-            s += static_cast<float>(window_.at(i).value) * k[i];
-        return s;
-    }
-
-    const SystemConfig& cfg_;
-    float               threshold_;
-    SlidingWindow       window_;
-    size_t              half_width_;
-    BoundaryPolicy      policy_;
-    uint64_t            current_row_ = UINT64_MAX;
-
-    struct PendingOutput {
-        bool     has_b1 = false, has_b2 = false;
-        uint8_t  b1 = 0, b2 = 0;
-        uint64_t row = 0, col = 0;
-    } pending_;
-};
-
-// ============================================================================
-// Performance stats
-// ============================================================================
-
-struct Stats {
-    uint64_t min_ns = UINT64_MAX, max_ns = 0, p50_ns = 0, p99_ns = 0;
-    double   avg_ns = 0.0;
-    size_t   count  = 0;
-};
-
-static Stats computeStats(std::vector<uint64_t>& gaps) {
-    Stats s;
-    if (gaps.empty()) return s;
-
-    uint64_t sum = 0;
-    for (uint64_t g : gaps) {
-        if (g < s.min_ns) s.min_ns = g;
-        if (g > s.max_ns) s.max_ns = g;
-        sum += g;
-    }
-    s.count  = gaps.size();
-    s.avg_ns = static_cast<double>(sum) / s.count;
-    std::sort(gaps.begin(), gaps.end());
-    s.p50_ns = gaps[s.count / 2];
-    s.p99_ns = gaps[static_cast<size_t>(0.99 * s.count)];
-    return s;
-}
 
 // ============================================================================
 // Main
@@ -333,7 +203,7 @@ int main(int argc, char** argv) {
         if (pixel_timestamps[i] >= pixel_timestamps[i - 1])
             gaps.push_back(pixel_timestamps[i] - pixel_timestamps[i - 1]);
 
-    Stats stats = computeStats(gaps);
+    LinearStats stats = computeLinearStats(gaps);
 
     // 6. Performance report
     std::cout << "========================================\n"

@@ -6,7 +6,9 @@
 #include "ConfigManager.hpp"   // SystemConfig
 
 #include <vector>
+#include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <atomic>
 
 #ifdef CYNLR_PERF_BUILD
@@ -62,4 +64,35 @@ private:
     std::atomic<bool> running_{true};
 };
 
+
+
+class LinearFilter {
+public:
+    explicit LinearFilter(const SystemConfig& cfg);
+    void beginRow(uint8_t left_edge, uint64_t row);
+    bool processSample(uint8_t value, uint64_t row, uint64_t col,
+                       FilteredPacket& fp);
+    void flush(uint8_t edge, uint64_t row, uint64_t last_col,
+               std::vector<FilteredPacket>& out);
+private:
+    // 9-tap unrolled fast path, generic loop fallback — identical to FilterBlock.
+    float dotProduct() const;
+
+private:
+    const SystemConfig& cfg_;
+    float               threshold_;
+    SlidingWindow       window_;
+    size_t              half_width_;
+    BoundaryPolicy      policy_;
+    uint64_t            current_row_ = UINT64_MAX;  // sentinel: no row seen yet
+
+    struct PendingOutput {
+        bool     has_b1 = false;
+        bool     has_b2 = false;
+        uint8_t  b1     = 0;
+        uint8_t  b2     = 0;
+        uint64_t row    = 0;
+        uint64_t col    = 0;
+    } pending_;
+};
 #endif // FILTER_BLOCK_HPP

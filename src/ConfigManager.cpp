@@ -16,13 +16,16 @@ SystemConfig ConfigManager::load(int argc, char** argv) {
     
     std::string cfg_path = "config.cfg";
     bool explicit_path = false;
+    std::cout<<"argc : "<<argc<<std::endl;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        std::cout << "CLI Arg: " << arg << '\n';
 
         // --config=<path> style
         if (arg.rfind("--config=", 0) == 0) {
             cfg_path = arg.substr(9);
+            std::cout << "[ConfigManager] Detected config path from CLI: " << cfg_path << '\n';
             explicit_path = true;
             break;
         }
@@ -135,7 +138,12 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
 }
 
 void ConfigManager::validate(SystemConfig& config) {
-    if (config.columns == 0) {
+    // if (config.columns == 0 ) {
+    //     throw std::runtime_error("Invalid config: columns (m) must be > 0");
+    // }
+
+    // If CSV mode, columns=0 is OK — CSVDataSource will auto-detect from file
+    if (config.columns == 0 && config.mode != Mode::CSV) {
         throw std::runtime_error("Invalid config: columns (m) must be > 0");
     }
     

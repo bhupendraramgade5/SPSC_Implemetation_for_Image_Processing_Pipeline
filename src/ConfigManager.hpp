@@ -55,7 +55,7 @@ struct SystemConfig {
     CSVMismatchPolicy csv_mismatch_policy = CSVMismatchPolicy::REJECT;
 
     // Output stage — parsed here, consumed by OutputWriter
-    bool        write_output = false;
+    bool        write_output = true;
     std::string output_file  = "output.csv";
 };
 

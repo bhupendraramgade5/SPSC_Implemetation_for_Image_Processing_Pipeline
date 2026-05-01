@@ -1,20 +1,6 @@
 #pragma once
 
-// OutputWriter.hpp
-// Adapter pattern: decouples the filter-output sink from the pipeline logic.
-//
-// The filter produces FilteredPacket (b1, b2, row, col).
-// Each packet carries two filtered pixels emitted at the same moment.
-//
-// Three implementations:
-//   NullOutputWriter   – no-op; used when write_output = false
-//   CSVOutputWriter    – writes row,col,b1,b2 to a CSV file (buffered)
-//   StdoutOutputWriter – prints to console (debugging)
-//
-// NOTE ON LATENCY
-//   File I/O is intentionally outside the 100 ns timing budget.
-//   The pipeline measures filter latency separately; the writer is a
-//   post-processing sink, not part of the critical path.
+
 
 #include <cstdint>
 #include <string>
@@ -69,6 +55,13 @@ public:
             throw std::runtime_error(
                 "OutputWriter: cannot open file '" + path + "'");
 
+        // Tell the user exactly where the file will appear
+        std::error_code abs_ec;
+        auto abs = std::filesystem::absolute(path, abs_ec);
+        std::cout << "[OutputWriter] Writing to: "
+                  << ((!abs_ec && !abs.empty()) ? abs.string() : path)
+                  << '\n';
+
         file_ << "row,col,b1,b2\n";
     }
 
@@ -87,8 +80,16 @@ public:
         if (file_.is_open()) {
             file_.flush();
             file_.close();
+
+            // Resolve to absolute path so the user knows exactly where to look
+            std::error_code ec;
+            auto abs = std::filesystem::absolute(path_, ec);
+            const std::string display = (!ec && !abs.empty())
+                                      ? abs.string()
+                                      : path_;
+
             std::cout << "[OutputWriter] " << written_
-                      << " packets written to " << path_ << '\n';
+                      << " packets written to " << display << '\n';
         }
     }
 
