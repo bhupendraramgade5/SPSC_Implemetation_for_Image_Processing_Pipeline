@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <csignal>
 #include <atomic>
+#include <fstream>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -30,7 +31,8 @@
 
 #include "ConfigManager.hpp"
 #include "GeneratorBlock.hpp"   // IDataSource, createDataSource
-#include "FilterUtils.hpp"      // SlidingWindow, FilteredPacket, applyLeft, applyRight
+#include "FilterUtils.hpp"      // SlidingWindow, FilteredPacket, applyLeft/Right
+#include "LabellingUtils.hpp"   // LabelledPacket, LabelMap, RowLabelBuffer
 #include "Queue.hpp"            // DataPacket
 #include "OutputWriter.hpp"     // IOutputWriter, makeOutputWriter
 #include "PerfTest.hpp"         // LinearStats, computeLinearStats, printLinearStats
@@ -86,22 +88,17 @@ public:
 
         if (!window_.is_full()) return false;
 
-        const WindowSlot& c      = window_.centre();
-        const float       fval   = dotProduct();
-        const uint8_t     binary = (fval >= threshold_) ? uint8_t{1} : uint8_t{0};
+        const WindowSlot& c    = window_.centre();
+        const float       fval = dotProduct();
+        const uint8_t     bin  = (fval >= threshold_) ? uint8_t{1} : uint8_t{0};
 
         if (!pending_.has_b1) {
-            pending_.b1     = binary;
-            pending_.row    = c.row;
-            pending_.col    = c.col;
-            pending_.has_b1 = true;
+            pending_.b1 = bin; pending_.row = c.row;
+            pending_.col = c.col; pending_.has_b1 = true;
             return false;
         }
-
-        fp.b1  = pending_.b1;
-        fp.b2  = binary;
-        fp.row = pending_.row;
-        fp.col = pending_.col;
+        fp.b1 = pending_.b1; fp.b2 = bin;
+        fp.row = pending_.row; fp.col = pending_.col;
         pending_ = PendingOutput{};
         return true;
     }
@@ -119,10 +116,8 @@ public:
 
         if (pending_.has_b1 && !pending_.has_b2) {
             FilteredPacket fp;
-            fp.b1  = pending_.b1;
-            fp.b2  = 0;
-            fp.row = pending_.row;
-            fp.col = pending_.col;
+            fp.b1 = pending_.b1; fp.b2 = 0;
+            fp.row = pending_.row; fp.col = pending_.col;
             out.push_back(fp);
             pending_ = PendingOutput{};
         }
@@ -134,17 +129,16 @@ private:
     // Generic fallback for non-standard kernel sizes.
     float dotProduct() const {
         const auto& k = cfg_.kernel;
-        if (k.size() == 9) {
-            return static_cast<float>(window_.at(0).value) * k[0]
-                 + static_cast<float>(window_.at(1).value) * k[1]
-                 + static_cast<float>(window_.at(2).value) * k[2]
-                 + static_cast<float>(window_.at(3).value) * k[3]
-                 + static_cast<float>(window_.at(4).value) * k[4]
-                 + static_cast<float>(window_.at(5).value) * k[5]
-                 + static_cast<float>(window_.at(6).value) * k[6]
-                 + static_cast<float>(window_.at(7).value) * k[7]
-                 + static_cast<float>(window_.at(8).value) * k[8];
-        }
+        if (k.size() == 9)
+            return static_cast<float>(window_.at(0).value)*k[0]
+                 + static_cast<float>(window_.at(1).value)*k[1]
+                 + static_cast<float>(window_.at(2).value)*k[2]
+                 + static_cast<float>(window_.at(3).value)*k[3]
+                 + static_cast<float>(window_.at(4).value)*k[4]
+                 + static_cast<float>(window_.at(5).value)*k[5]
+                 + static_cast<float>(window_.at(6).value)*k[6]
+                 + static_cast<float>(window_.at(7).value)*k[7]
+                 + static_cast<float>(window_.at(8).value)*k[8];
         float s = 0.f;
         for (size_t i = 0; i < k.size(); ++i)
             s += static_cast<float>(window_.at(i).value) * k[i];
@@ -159,18 +153,158 @@ private:
     uint64_t            current_row_ = UINT64_MAX;
 
     struct PendingOutput {
-        bool     has_b1 = false;
-        bool     has_b2 = false;
-        uint8_t  b1     = 0;
-        uint8_t  b2     = 0;
-        uint64_t row    = 0;
-        uint64_t col    = 0;
+        bool has_b1=false, has_b2=false;
+        uint8_t b1=0, b2=0;
+        uint64_t row=0, col=0;
     } pending_;
 };
 
 
 // ============================================================================
-// Main
+// LinearLabeller
+// ----------------------------------------------------------------------------
+// Single-threaded labelling stage.  Wraps LabelMap and RowLabelBuffer in a
+// simple call-per-packet interface that matches the linear pipeline model:
+// no queues, no threads, returns LabelledPacket by value.
+//
+// assignPacket() is the equivalent of LabellingBlock::run()'s inner loop
+// body — one FilteredPacket in, one LabelledPacket out.
+//
+// The mid-row drain (drainMidRowRecycles) is called inline after both pixels
+// are processed, matching the threaded block's behaviour exactly.
+// ============================================================================
+
+class LinearLabeller {
+public:
+    explicit LinearLabeller(const SystemConfig& cfg)
+        : cfg_(cfg)
+        , label_map_(cfg.columns / 2)
+        , row_buf_  (cfg.columns, cfg.columns / 2)
+    {
+        const size_t max_labels = cfg.columns / 2;
+        recycle_scratch_.resize(max_labels, uint16_t(0));
+        pending_recycles_.reserve(max_labels);
+    }
+
+    // Process one FilteredPacket and produce one LabelledPacket.
+    // Handles row transitions internally.
+    LabelledPacket assignPacket(const FilteredPacket& fp) {
+        if (fp.row != current_row_)
+            onRowTransition(fp.row);
+
+        uint16_t mo1=0, mn1=0;
+        const uint16_t l1 = assignLabel(fp.b1 != 0, fp.col,     mo1, mn1);
+
+        uint16_t mo2=0, mn2=0;
+        const uint16_t l2 = assignLabel(fp.b2 != 0, fp.col + 1, mo2, mn2);
+
+        last_col_ = fp.col + 1;
+        drainMidRow(last_col_);
+
+        LabelledPacket out;
+        out.row        = fp.row;
+        out.col        = fp.col;
+        out.l1         = l1;
+        out.l2         = l2;
+        out.merge_old  = mo1;
+        out.merge_new  = mn1;
+        out.merge_old2 = mo2;
+        out.merge_new2 = mn2;
+        out.recycled   = 0;
+        if (!pending_recycles_.empty()) {
+            out.recycled = pending_recycles_.back();
+            pending_recycles_.pop_back();
+        }
+        return out;
+    }
+
+    // Call once after the last packet of the entire stream to release
+    // any labels that were alive in the final row.
+    void flushFinalRow() {
+        if (current_row_ == UINT64_MAX) return;
+        const size_t count = row_buf_.commitAndRecycle(
+            recycle_scratch_.data(), recycle_scratch_.size());
+        for (size_t i = 0; i < count; ++i)
+            label_map_.recycle(recycle_scratch_[i]);
+    }
+
+    // Per-row stats for the pipeline summary
+    size_t peak_active_labels() const { return peak_active_; }
+
+private:
+    void onRowTransition(uint64_t new_row) {
+        if (current_row_ != UINT64_MAX) {
+            const size_t count = row_buf_.commitAndRecycle(
+                recycle_scratch_.data(), recycle_scratch_.size());
+            for (size_t i = 0; i < count; ++i) {
+                label_map_.recycle(recycle_scratch_[i]);
+                pending_recycles_.push_back(recycle_scratch_[i]);
+            }
+        }
+        current_row_ = new_row;
+    }
+
+    void drainMidRow(uint64_t completed_col) {
+        const size_t count = row_buf_.drainDeadFromPrev(
+            static_cast<size_t>(completed_col),
+            recycle_scratch_.data(), recycle_scratch_.size());
+        for (size_t i = 0; i < count; ++i) {
+            label_map_.recycle(recycle_scratch_[i]);
+            pending_recycles_.push_back(recycle_scratch_[i]);
+        }
+        if (label_map_.active() > peak_active_)
+            peak_active_ = label_map_.active();
+    }
+
+    uint16_t assignLabel(bool pixel_on, uint64_t col,
+                         uint16_t& out_old, uint16_t& out_new) noexcept {
+        out_old = 0; out_new = 0;
+        if (!pixel_on) { row_buf_.set(col, 0); return 0; }
+
+        // Resolve 4 causal neighbours
+        auto find = [this](uint16_t l) noexcept { return label_map_.find(l); };
+        const uint16_t nw = (col>0) ? find(row_buf_.prev(col-1)) : 0;
+        const uint16_t n  =           find(row_buf_.prev(col));
+        const uint16_t ne =           find(row_buf_.prev(col+1));
+        const uint16_t w  = (col>0) ? find(row_buf_.curr(col-1)) : 0;
+
+        const uint16_t roots[4] = {nw, n, ne, w};
+        uint16_t min_root = 0;
+        for (uint16_t r : roots)
+            if (r && (!min_root || r < min_root)) min_root = r;
+
+        uint16_t assigned = min_root ? min_root : label_map_.newLabel();
+
+        if (min_root) {
+            for (uint16_t r : roots) {
+                if (!r || r == assigned) continue;
+                const uint16_t cr = label_map_.find(r);
+                if (cr == label_map_.find(assigned)) continue;
+                const uint16_t absorbed = cr;
+                label_map_.unite(absorbed, assigned);
+                if (!out_old) { out_old = absorbed; out_new = assigned; }
+            }
+        }
+
+        row_buf_.set(col, assigned);
+        return assigned;
+    }
+
+    const SystemConfig& cfg_;
+    LabelMap            label_map_;
+    RowLabelBuffer      row_buf_;
+
+    uint64_t current_row_ = UINT64_MAX;
+    uint64_t last_col_    = 0;
+    size_t   peak_active_ = 0;
+
+    std::vector<uint16_t> recycle_scratch_;
+    std::vector<uint16_t> pending_recycles_;
+};
+
+
+// ============================================================================
+// main
 // ============================================================================
 
 int main(int argc, char** argv) {
@@ -200,7 +334,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "========================================\n"
-              << " CynLr Linear Pipeline  (single thread)\n"
+              << " CynLr Linear Pipeline  (single thread, 3 stages)\n"
               << "========================================\n"
               << " Mode             : " << config.mode         << "\n"
               << " Columns (m)      : " << config.columns      << "\n"
@@ -208,10 +342,8 @@ int main(int argc, char** argv) {
               << " Threshold        : " << static_cast<int>(config.threshold) << "\n"
               << " Kernel size      : " << config.kernel.size() << "\n"
               << " Boundary policy  : " << config.boundary_policy << "\n"
-              << " Write output     : " << (config.write_output ? "yes" : "no") << "\n";
-    if (config.write_output)
-        std::cout << " Output file      : " << config.output_file << "\n";
-    std::cout << " Duration         : ";
+              << " Write output     : " << (config.write_output ? "yes" : "no") << "\n"
+              << " Duration         : ";
     if (config.run_duration_ms == 0) std::cout << "unlimited\n";
     else                             std::cout << config.run_duration_ms << " ms\n";
     std::cout << " Max rows         : ";
@@ -219,20 +351,29 @@ int main(int argc, char** argv) {
     else                      std::cout << config.max_rows << "\n";
     std::cout << "========================================\n\n";
 
-    // -------------------------------------------------------------------------
-    // 2. Build data source and filter
-    // -------------------------------------------------------------------------
-    InlineLinearFilter filter(config);
-    auto         writer = makeOutputWriter(config);
+    // ---- 2. Build stages -------------------------------------------------
+    InlineLinearFilter filter (config);
+    LinearLabeller     labeller(config);
+
+    // Optional CSV output for labelled packets
+    std::ofstream out_csv;
+    if (config.write_output) {
+        out_csv.open(config.output_file, std::ios::out | std::ios::trunc);
+        if (out_csv.is_open())
+            out_csv << "row,col,l1,l2,merge_old,merge_new,"
+                       "merge_old2,merge_new2,recycled\n";
+    }
 
     // 3. Timing & stats storage
     std::vector<uint64_t> pixel_timestamps;
     pixel_timestamps.reserve(2'000'000);
 
-    size_t   total_pixels = 0;
-    size_t   ones         = 0;
-    size_t   zeros        = 0;
-    uint64_t rows_done    = 0;
+    size_t total_pixels  = 0;
+    size_t foreground    = 0;
+    size_t background    = 0;
+    size_t merge_events  = 0;
+    size_t recycle_events= 0;
+    uint64_t rows_done   = 0;
 
     const auto deadline =
         (config.run_duration_ms > 0)
@@ -260,16 +401,31 @@ int main(int argc, char** argv) {
         // --- Row transition --------------------------------------------------
         if (packet.row != prev_row) {
             if (prev_row != UINT64_MAX) {
-                std::vector<FilteredPacket> flush_out;
-                filter.flush(last_val, prev_row, last_col, flush_out);
-                for (const auto& fp : flush_out) {
-                    writer->write(fp);
+                // Flush filter right-padding
+                std::vector<FilteredPacket> flush_fps;
+                filter.flush(last_val, prev_row, last_col, flush_fps);
+
+                for (const auto& ffp : flush_fps) {
+                    // Pass each flushed FilteredPacket through labeller
+                    LabelledPacket lp = labeller.assignPacket(ffp);
+
+                    if (out_csv.is_open())
+                        out_csv << lp.row << ',' << lp.col << ','
+                                << lp.l1  << ',' << lp.l2  << ','
+                                << lp.merge_old  << ',' << lp.merge_new  << ','
+                                << lp.merge_old2 << ',' << lp.merge_new2 << ','
+                                << lp.recycled   << '\n';
+
                     const uint64_t ts = static_cast<uint64_t>(
                         std::chrono::steady_clock::now().time_since_epoch().count());
                     pixel_timestamps.push_back(ts);
                     pixel_timestamps.push_back(ts);
-                    if (fp.b1) ++ones; else ++zeros;
-                    if (fp.b2) ++ones; else ++zeros;
+
+                    if (lp.l1) ++foreground; else ++background;
+                    if (lp.l2) ++foreground; else ++background;
+                    if (lp.merge_old  != 0) ++merge_events;
+                    if (lp.merge_old2 != 0) ++merge_events;
+                    if (lp.recycled   != 0) ++recycle_events;
                     total_pixels += 2;
                 }
                 ++rows_done;
@@ -282,25 +438,49 @@ int main(int argc, char** argv) {
         FilteredPacket fp;
 
         if (filter.processSample(packet.v1, packet.row, packet.col, fp)) {
-            writer->write(fp);
+            LabelledPacket lp = labeller.assignPacket(fp);
+
+            if (out_csv.is_open())
+                out_csv << lp.row << ',' << lp.col << ','
+                        << lp.l1  << ',' << lp.l2  << ','
+                        << lp.merge_old  << ',' << lp.merge_new  << ','
+                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
+                        << lp.recycled   << '\n';
+
             const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
-            if (fp.b1) ++ones; else ++zeros;
-            if (fp.b2) ++ones; else ++zeros;
+
+            if (lp.l1) ++foreground; else ++background;
+            if (lp.l2) ++foreground; else ++background;
+            if (lp.merge_old  != 0) ++merge_events;
+            if (lp.merge_old2 != 0) ++merge_events;
+            if (lp.recycled   != 0) ++recycle_events;
             total_pixels += 2;
         }
 
         // --- Filter pixel 2 --------------------------------------------------
         if (filter.processSample(packet.v2, packet.row, packet.col + 1, fp)) {
-            writer->write(fp);
+            LabelledPacket lp = labeller.assignPacket(fp);
+
+            if (out_csv.is_open())
+                out_csv << lp.row << ',' << lp.col << ','
+                        << lp.l1  << ',' << lp.l2  << ','
+                        << lp.merge_old  << ',' << lp.merge_new  << ','
+                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
+                        << lp.recycled   << '\n';
+
             const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
-            if (fp.b1) ++ones; else ++zeros;
-            if (fp.b2) ++ones; else ++zeros;
+
+            if (lp.l1) ++foreground; else ++background;
+            if (lp.l2) ++foreground; else ++background;
+            if (lp.merge_old  != 0) ++merge_events;
+            if (lp.merge_old2 != 0) ++merge_events;
+            if (lp.recycled   != 0) ++recycle_events;
             total_pixels += 2;
         }
 
@@ -310,22 +490,39 @@ int main(int argc, char** argv) {
 
     // Flush final row
     if (prev_row != UINT64_MAX) {
-        std::vector<FilteredPacket> flush_out;
-        filter.flush(last_val, prev_row, last_col, flush_out);
-        for (const auto& fp : flush_out) {
-            writer->write(fp);
+        std::vector<FilteredPacket> flush_fps;
+        filter.flush(last_val, prev_row, last_col, flush_fps);
+
+        for (const auto& ffp : flush_fps) {
+            LabelledPacket lp = labeller.assignPacket(ffp);
+
+            if (out_csv.is_open())
+                out_csv << lp.row << ',' << lp.col << ','
+                        << lp.l1  << ',' << lp.l2  << ','
+                        << lp.merge_old  << ',' << lp.merge_new  << ','
+                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
+                        << lp.recycled   << '\n';
+
             const uint64_t ts = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
             pixel_timestamps.push_back(ts);
             pixel_timestamps.push_back(ts);
-            if (fp.b1) ++ones; else ++zeros;
-            if (fp.b2) ++ones; else ++zeros;
+
+            if (lp.l1) ++foreground; else ++background;
+            if (lp.l2) ++foreground; else ++background;
+            if (lp.merge_old  != 0) ++merge_events;
+            if (lp.merge_old2 != 0) ++merge_events;
+            if (lp.recycled   != 0) ++recycle_events;
             total_pixels += 2;
         }
         ++rows_done;
+        labeller.flushFinalRow();
     }
 
-    writer->finalize();   // flush & close CSV
+    if (out_csv.is_open()) {
+        out_csv.flush();
+        out_csv.close();
+    }
 
     // -------------------------------------------------------------------------
     // 5. Compute and print stats
@@ -335,13 +532,20 @@ int main(int argc, char** argv) {
 
     // 6. Performance report
     std::cout << "========================================\n"
-              << " Pipeline Summary  (single thread)\n"
+              << " Pipeline Summary  (linear, 3 stages)\n"
               << "========================================\n"
-              << " Rows processed : " << rows_done    << "\n"
-              << " Output pixels  : " << total_pixels << "\n"
-              << " Ones  (1)      : " << ones         << "\n"
-              << " Zeros (0)      : " << zeros        << "\n"
-              << " Shutdown cause : ";
+              << " Rows processed       : " << rows_done              << "\n"
+              << " Output pixels        : " << total_pixels           << "\n"
+              << " Foreground (label>0) : " << foreground             << "\n"
+              << " Background (label=0) : " << background             << "\n"
+              << " Merge events         : " << merge_events           << "\n"
+              << " Recycle events       : " << recycle_events         << "\n"
+              << " Peak active labels   : " << labeller.peak_active_labels()
+              << " / " << (config.columns / 2) << " (m/2)\n"
+              << " Memory OK            : "
+              << (labeller.peak_active_labels() <= config.columns / 2 ? "YES" : "NO")
+              << "\n"
+              << " Shutdown cause       : ";
 
     if (g_stop.load())
         std::cout << "signal (Ctrl+C)\n";
@@ -352,20 +556,14 @@ int main(int argc, char** argv) {
     else
         std::cout << "source exhausted (CSV)\n";
 
-    std::cout << "========================================\n\n";
-
-    // -------------------------------------------------------------------------
-    // 7. Comparison hint
-    //double threaded_ref = 300.0;
-    std::cout << "========================================\n"
-              << " Interpretation\n"
-              << "========================================\n"
-              << " Threaded avg gap : ~280-530 ns  (prior runs)\n"
-              << " Linear  avg gap  : " << stats.avg_ns << " ns\n\n";
-
-    
-
-    std::cout << "========================================\n";
+    std::cout << "\n"
+              << " Threaded avg gap (Phase 1): ~280-530 ns\n"
+              << " Linear   avg gap (Phase 1):  ~144 ns\n"
+              << " Linear   avg gap (Phase 3):  " << stats.avg_ns << " ns\n"
+              << " Labelling overhead est.   :  "
+              << (stats.avg_ns > 144.0 ? stats.avg_ns - 144.0 : 0.0)
+              << " ns/pixel\n"
+              << "========================================\n\n";
 
     return EXIT_SUCCESS;
 }

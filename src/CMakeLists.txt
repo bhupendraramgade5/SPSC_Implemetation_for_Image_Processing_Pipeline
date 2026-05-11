@@ -10,6 +10,7 @@ set(CYNLR_SOURCES
     ConfigManager.cpp
     GeneratorBlock.cpp
     Filterblock.cpp
+    Labellingblock.cpp
 )
 # added new 
 set(CYNLR_HEADERS
@@ -20,6 +21,8 @@ set(CYNLR_HEADERS
     Queue.hpp
     PerfTest.hpp
     OutputWriter.hpp
+    Labellingutils.hpp
+    Labellingblock.hpp
 )
 
 # Commented for more flexible source/header management, and to avoid listing headers in the executable target.
@@ -167,3 +170,18 @@ set_target_properties(CynLr_Linear PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
  
+
+add_executable(test_labelling
+    TestLabelling.cpp
+    ${CYNLR_SOURCES}
+    ${CYNLR_HEADERS}
+)
+target_include_directories(test_labelling PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_labelling PRIVATE cynlr_compiler_options)
+if(WIN32)
+    target_link_libraries(test_labelling PRIVATE winmm)
+endif()
+set_property(TARGET test_labelling PROPERTY CXX_STANDARD 17)
+set_target_properties(test_labelling PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)

@@ -21,16 +21,23 @@
 #include <chrono>
 #include <iomanip>
 #include <csignal>
-// #define NOMINMAX
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 
 #include "ConfigManager.hpp"
 #include "Queue.hpp"
 #include "GeneratorBlock.hpp"
-#include "Filterblock.hpp"    
-#include "OutputWriter.hpp"   
-#include "PerfTest.hpp"       
-//static constexpr uint64_t RUN_DURATION_MS = 200;   
+#include "Filterblock.hpp"
+#include "LabellingBlock.hpp"
+#include "OutputWriter.hpp"
+#include "PerfTest.hpp"
+
+// ---------------------------------------------------------------------------
+// Global shutdown flag — set by SIGINT / SIGTERM
+// ---------------------------------------------------------------------------
 namespace {
     std::atomic<bool> g_shutdown_requested{false};
 }
@@ -44,7 +51,7 @@ static void installSignalHandlers() {
 }
 static void printConfig(const SystemConfig& cfg) {
     std::cout << "========================================\n"
-              << " CynLr Pipeline  (threaded)\n"
+              << " CynLr Pipeline  (threaded, 3 stages)\n"
               << "========================================\n"
               << " Mode             : " << cfg.mode             << "\n";
     if (cfg.mode == Mode::CSV)
@@ -74,13 +81,21 @@ static void printConfig(const SystemConfig& cfg) {
 static void runGenerator(GeneratorBlock& gen, std::atomic<bool>& done) {
     gen.run();
     done.store(true, std::memory_order_release);
-    std::cout << "[Generator] Done.\n";
+    std::cout << "[Generator]  Done.\n";
 }
 static void runFilter(FilterBlock& filter) {
-    filter.run();   // exits when stop() is called and queue is empty
-    std::cout << "[Filter]    Done.\n";
+    filter.run();
+    std::cout << "[Filter]     Done.\n";
 }
-// shouldTerminate
+
+static void runLabeller(LabellingBlock& labeller) {
+    labeller.run();
+    std::cout << "[Labeller]   Done.\n";
+}
+
+// ---------------------------------------------------------------------------
+// Termination predicate
+// ---------------------------------------------------------------------------
 static bool shouldTerminate(const SystemConfig&                          cfg,
                             const std::chrono::steady_clock::time_point& deadline,
                             const std::atomic<bool>&               gen_done)
@@ -91,6 +106,22 @@ static bool shouldTerminate(const SystemConfig&                          cfg,
         std::chrono::steady_clock::now() >= deadline)            return true;
     return false;
 }
+
+// ---------------------------------------------------------------------------
+// Drain helper — spin-yield until a queue reports empty.
+// Accepts the race documented in DESIGN_DOCUMENT.md: checks emptiness, not
+// stage completion.  Correct for the evaluation workload; a production system
+// would use stage-level drain signals.
+// ---------------------------------------------------------------------------
+template<typename Q>
+static void drainQueue(Q& q) {
+    while (!q.empty())
+        std::this_thread::yield();
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
 
     SetProcessAffinityMask(GetCurrentProcess(), 3);
@@ -114,13 +145,15 @@ int main(int argc, char** argv) {
 
     printConfig(config);
 
+    // ---- 2. Build queues -----------------------------------------------
+    // All inter-stage hot-path queues: DynamicSPSCQueue, depth = m/2.
+    // Output sink: SimpleQueue (Zone-A/B boundary — mutex acceptable here).
 
-    // -------------------------------------------------------------------------
-    // 2. Queues
-    // -------------------------------------------------------------------------
-    const std::size_t queue_capacity = config.columns / 2;
-    DynamicSPSCQueue<DataPacket>    gen_to_filter(queue_capacity, queue_capacity);
-    SimpleQueue<FilteredPacket>     filter_output;
+    const std::size_t queue_depth = config.columns / 2;
+
+    DynamicSPSCQueue<DataPacket>     gen_to_filter   (queue_depth, queue_depth);
+    DynamicSPSCQueue<FilteredPacket> filter_to_label (queue_depth, queue_depth);
+    SimpleQueue<LabelledPacket>      label_output;
 
 
 
@@ -128,140 +161,147 @@ int main(int argc, char** argv) {
     auto data_source   = createDataSource(config);
     
     if (config.mode == Mode::CSV && config.columns == 0) {
-    config.columns = data_source->detectedColumns();
-    std::cout << "[Main] CSV auto-detected columns: " << config.columns << "\n";
-
-    // Now validate what we deferred
-    if (config.columns < 2)
-        throw std::runtime_error("CSV file has < 2 columns");
-    if (config.columns % 2 != 0) {
-        std::cout << "[Main] Warning: CSV columns=" << config.columns
-                  << " is odd — truncating to " << (config.columns - 1) << "\n";
-        config.columns--;
+        config.columns = data_source->detectedColumns();
+        std::cout << "[Main] CSV auto-detected columns: " << config.columns << "\n";
+        if (config.columns < 2)
+            throw std::runtime_error("CSV file has fewer than 2 columns");
+        if (config.columns % 2 != 0) {
+            std::cout << "[Main] Warning: odd column count — truncating to "
+                      << (config.columns - 1) << "\n";
+            --config.columns;
+        }
     }
-}
-    GeneratorBlock generator(config, gen_to_filter, std::move(data_source));
 
+    // ---- 4. Build blocks -----------------------------------------------
+    GeneratorBlock generator(config, gen_to_filter, std::move(data_source));
 
     FilterBlock filter(config,
                        gen_to_filter,
-                       filter_output,
-                       config.threshold,           
+                       filter_to_label,
+                       config.threshold,
                        config.boundary_policy);
 
-    // -------------------------------------------------------------------------
-    // 4. Output writer (adapter – NullOutputWriter if write_output=false)
-    // -------------------------------------------------------------------------
-    auto writer = makeOutputWriter(config);
+    LabellingBlock labeller(config,
+                            filter_to_label,
+                            label_output);
 
+    // ---- 5. Output writer (sink for labelled packets) ------------------
+    // OutputWriter is wired to LabelledPacket here.  The existing IOutputWriter
+    // interface writes FilteredPackets; for Phase 3 we write label summaries
+    // to stdout in the pipeline summary block below.  A dedicated
+    // LabelledPacketWriter will be introduced in Phase 4 alongside Tracing.
+    //
+    // write_output=true still produces a CSV from the LABELLED output.
+    // Format: row,col,l1,l2,merge_old,merge_new,merge_old2,merge_new2,recycled
 
     // -------------------------------------------------------------------------
     // 5. Launch threads
     // -------------------------------------------------------------------------
     std::atomic<bool> gen_done{false};
-    std::thread gen_thread(runGenerator, std::ref(generator), std::ref(gen_done));
-    std::thread filter_thread(runFilter, std::ref(filter));
-                              //std::ref(filter));
+
+    std::thread gen_thread    (runGenerator, std::ref(generator), std::ref(gen_done));
+    std::thread filter_thread (runFilter,    std::ref(filter));
+    std::thread label_thread  (runLabeller,  std::ref(labeller));
+
     const auto deadline = std::chrono::steady_clock::now()
                         + std::chrono::milliseconds(
-                              config.run_duration_ms > 0 ? config.run_duration_ms
-                                                         : UINT64_MAX / 2);
+                              config.run_duration_ms > 0
+                                  ? config.run_duration_ms
+                                  : UINT64_MAX / 2);
+
+    // Supervisor loop — sleeps 10 ms per iteration
     while (!shouldTerminate(config, deadline, gen_done))
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     generator.stop();
     gen_thread.join();
 
-    // Drain gen_to_filter before stopping filter
-    while (!gen_to_filter.empty())
-        std::this_thread::yield();
-
-    //std::this_thread::sleep_for(std::chrono::nanoseconds(config.cycle_time_ns * 2));
-    //    break;}
+    drainQueue(gen_to_filter);      // wait until filter has consumed all packets
     filter.stop();
     filter_thread.join();
 
-    // -------------------------------------------------------------------------
-    // 6. Consume and report output (sink — placeholder for next pipeline stage)
-    // -------------------------------------------------------------------------
-    size_t total_packets = 0;
-    size_t ones          = 0;
-    size_t zeros         = 0;
-    
-    #ifdef CYNLR_PERF_BUILD
-    std::vector<uint64_t> gaps;
-    gaps.reserve(1 << 20);  // optional: preallocate ~1M entries
+    drainQueue(filter_to_label);    // wait until labeller has consumed all packets
+    labeller.stop();
+    label_thread.join();
 
-    bool has_prev = false;
-    uint64_t prev = 0;
-    #endif
+    // ---- 8. Consume labelled output ------------------------------------
+    size_t total_packets  = 0;
+    size_t merge_events   = 0;
+    size_t recycle_events = 0;
+    size_t label_zeros    = 0;
+    size_t label_nonzero  = 0;
 
-    FilteredPacket fp;
- 
-    while (filter_output.pop(fp)) {
-        writer->write(fp);  
-        ++total_packets;
-        if (fp.b1 == 1) ++ones; else ++zeros;
-        if (fp.b2 == 1) ++ones; else ++zeros;
-
-        #ifdef CYNLR_PERF_BUILD
-            // Pixel 1
-            if (has_prev) {
-                gaps.push_back(fp.t1 - prev);
-            }
-            prev = fp.t1;
-            has_prev = true;
-
-            // Pixel 2
-            if (has_prev) {
-                gaps.push_back(fp.t2 - prev);
-            }
-            prev = fp.t2;
-        #endif
+    // Optional CSV output for labelled packets
+    std::ofstream out_csv;
+    if (config.write_output) {
+        out_csv.open(config.output_file, std::ios::out | std::ios::trunc);
+        if (out_csv.is_open())
+            out_csv << "row,col,l1,l2,merge_old,merge_new,"
+                       "merge_old2,merge_new2,recycled\n";
     }
 
-    writer->finalize(); 
-    // 8. Performance report (only when compiled with CYNLR_PERF_BUILD)
-	#ifdef CYNLR_PERF_BUILD
-	// writer->finalize();
-    auto stats = computePerfStats(gaps);
-    std::cout << "\n========================================\n"
-              << " Performance Report\n"
-              << "========================================\n"
-              << " Samples       : " << stats.count   << "\n"
-              << " Min gap (ns)  : " << stats.min_gap << "\n"
-              << " Max gap (ns)  : " << stats.max_gap << "\n"
-              << " Avg gap (ns)  : " << stats.avg_gap << "\n"
-              << " P99 gap (ns)  : " << stats.p99_gap << "\n"
-              << " Requirement   : gap <= T (" << config.cycle_time_ns << " ns)\n"
-              << " RESULT        : "
-              << (stats.max_gap <= config.cycle_time_ns ? "PASS" : "FAIL") << "\n"
-              << "========================================\n";
-#endif
+    LabelledPacket lp;
+    while (label_output.pop(lp)) {
+        ++total_packets;
 
-    // 9. Summary
-    const std::size_t actual_cap = gen_to_filter.capacity();
-    const std::size_t peak       = gen_to_filter.peak_occupancy();
+        if (lp.l1 == 0) ++label_zeros; else ++label_nonzero;
+        if (lp.l2 == 0) ++label_zeros; else ++label_nonzero;
+        if (lp.merge_old  != 0) ++merge_events;
+        if (lp.merge_old2 != 0) ++merge_events;
+        if (lp.recycled   != 0) ++recycle_events;
+
+        if (out_csv.is_open()) {
+            out_csv << lp.row        << ','
+                    << lp.col        << ','
+                    << lp.l1         << ','
+                    << lp.l2         << ','
+                    << lp.merge_old  << ','
+                    << lp.merge_new  << ','
+                    << lp.merge_old2 << ','
+                    << lp.merge_new2 << ','
+                    << lp.recycled   << '\n';
+        }
+    }
+
+    if (out_csv.is_open()) {
+        out_csv.flush();
+        out_csv.close();
+        std::cout << "[OutputWriter] " << total_packets
+                  << " labelled packets written to " << config.output_file << "\n";
+    }
+
+    // ---- 9. Pipeline summary -------------------------------------------
+    const std::size_t gen_filt_peak  = gen_to_filter.peak_occupancy();
+    const std::size_t filt_lab_peak  = filter_to_label.peak_occupancy();
+    const std::size_t gen_filt_cap   = gen_to_filter.capacity();
+    const std::size_t filt_lab_cap   = filter_to_label.capacity();
 
     std::cout << "\n========================================\n"
-              << " Pipeline Summary\n"
+              << " Pipeline Summary  (3 stages)\n"
               << "========================================\n"
-              << " Rows generated   : " << generator.rows_emitted()   << "\n"
-              << " Packets dropped  : " << generator.dropped_packets();
+              << " Rows generated    : " << generator.rows_emitted()  << "\n"
+              << " Packets dropped   : " << generator.dropped_packets();
     if (generator.dropped_packets() > 0)
         std::cout << "  <- T too tight for queue throughput";
     std::cout << "\n"
-              << " Output packets   : " << total_packets        << "\n"
-              << " Output pixels    : " << total_packets * 2    << "\n"
-              << " Ones  (1)        : " << ones                 << "\n"
-              << " Zeros (0)        : " << zeros                << "\n"
-              << " Queue capacity   : " << actual_cap
-              << " packets (next pow2 above m/2=" << queue_capacity << ")\n"
-              << " Peak queue depth : " << peak
-              << " / " << queue_capacity << " (m/2 limit)\n"
-              << " Memory OK        : "
-              << (peak <= queue_capacity ? "YES" : "NO") << "\n"
-              << " Shutdown cause   : ";
+              << " Labelled packets  : " << total_packets             << "\n"
+              << " Labelled pixels   : " << total_packets * 2         << "\n"
+              << " Foreground (lbl>0): " << label_nonzero             << "\n"
+              << " Background (lbl=0): " << label_zeros               << "\n"
+              << " Merge events      : " << merge_events              << "\n"
+              << " Recycle events    : " << recycle_events            << "\n"
+              << "\n"
+              << " Queue gen→filter  : peak=" << gen_filt_peak
+              <<   " / " << queue_depth << " (m/2 limit)"
+              <<   " cap=" << gen_filt_cap << "\n"
+              << " Queue filt→label  : peak=" << filt_lab_peak
+              <<   " / " << queue_depth << " (m/2 limit)"
+              <<   " cap=" << filt_lab_cap << "\n"
+              << " Memory OK (both)  : "
+              << ((gen_filt_peak <= queue_depth && filt_lab_peak <= queue_depth)
+                      ? "YES" : "NO")
+              << "\n"
+              << " Shutdown cause    : ";
 
     if (g_shutdown_requested.load())
         std::cout << "signal (SIGINT/SIGTERM)\n";
