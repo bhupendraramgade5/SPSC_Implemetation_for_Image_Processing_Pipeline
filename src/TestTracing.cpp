@@ -212,6 +212,13 @@ static uint64_t totalPixels(const std::vector<CompletedBlob>& blobs) {
     return sum;
 }
 
+// [ADDED] Count non-zero (foreground) pixels in the raw binary input grid.
+static uint64_t totalForegroundPixels(const std::vector<uint8_t>& rows_data) {
+    uint64_t count = 0;
+    for (uint8_t v : rows_data) if (v != 0) ++count;
+    return count;
+}
+
 
 // ============================================================================
 // Section 1 — CompletedBlob layout
@@ -378,9 +385,11 @@ TEST(block_empty_input_no_blobs) {
 }
 
 TEST(block_all_background_no_blobs) {
-    // 2 rows × 4 cols, all zeros
-    auto blobs = runChain(4, std::vector<uint8_t>(8, 0));
+    std::vector<uint8_t> grid(8, 0);
+    auto blobs = runChain(4, grid);
     ASSERT_EQ(blobs.size(), size_t(0));
+    // Conservation: 0 foreground pixels → 0 blob pixels.
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -403,6 +412,7 @@ TEST(single_pixel_one_blob) {
     ASSERT_EQ(blobs[0].bottom_row,  uint64_t(0));
     ASSERT_EQ(blobs[0].left_col,    uint64_t(0));
     ASSERT_EQ(blobs[0].right_col,   uint64_t(0));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(single_pixel_bounding_box_is_1x1) {
@@ -416,6 +426,7 @@ TEST(single_pixel_bounding_box_is_1x1) {
     // Derived width = right - left + 1 = 1
     ASSERT_EQ(blobs[0].right_col - blobs[0].left_col + 1, uint64_t(1));
     ASSERT_EQ(blobs[0].bottom_row - blobs[0].top_row + 1, uint64_t(1));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -437,6 +448,7 @@ TEST(horizontal_run_single_blob) {
     ASSERT_EQ(blobs[0].right_col,   uint64_t(3));
     ASSERT_EQ(blobs[0].top_row,     uint64_t(0));
     ASSERT_EQ(blobs[0].bottom_row,  uint64_t(0));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(horizontal_run_correct_width) {
@@ -451,6 +463,7 @@ TEST(horizontal_run_correct_width) {
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(2));
     ASSERT_EQ(blobs[0].left_col,    uint64_t(1));
     ASSERT_EQ(blobs[0].right_col,   uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -475,6 +488,7 @@ TEST(vertical_run_single_blob) {
     ASSERT_EQ(blobs[0].bottom_row,  uint64_t(3));
     ASSERT_EQ(blobs[0].left_col,    uint64_t(0));
     ASSERT_EQ(blobs[0].right_col,   uint64_t(0));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(vertical_run_correct_height) {
@@ -489,6 +503,7 @@ TEST(vertical_run_correct_height) {
     ASSERT_EQ(blobs.size(), size_t(1));
     ASSERT_EQ(blobs[0].top_row,    uint64_t(1));
     ASSERT_EQ(blobs[0].bottom_row, uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -509,6 +524,7 @@ TEST(u_shape_merge_single_blob) {
     // All 7 foreground pixels (3+3+1 in rows 0,1,2) form ONE blob
     ASSERT_EQ(blobs.size(), size_t(1));
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(7));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(u_shape_bounding_box_correct) {
@@ -525,6 +541,7 @@ TEST(u_shape_bounding_box_correct) {
     ASSERT_EQ(blobs[0].bottom_row, uint64_t(2));
     ASSERT_EQ(blobs[0].left_col,   uint64_t(0));
     ASSERT_EQ(blobs[0].right_col,  uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(merge_combines_pixel_counts) {
@@ -539,6 +556,7 @@ TEST(merge_combines_pixel_counts) {
     };
     auto blobs = runChain(4, grid);
     ASSERT_EQ(totalPixels(blobs), uint64_t(7));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(merge_combined_bounding_box_is_union) {
@@ -557,6 +575,7 @@ TEST(merge_combined_bounding_box_is_union) {
     ASSERT_EQ(blobs.size(), size_t(1));
     ASSERT_EQ(blobs[0].left_col,  uint64_t(0));
     ASSERT_EQ(blobs[0].right_col, uint64_t(4));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -575,6 +594,7 @@ TEST(recycle_emits_before_reuse) {
     auto blobs = runChain(4, grid);
     // Two separate blobs
     ASSERT_EQ(blobs.size(), size_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(two_blobs_correct_pixel_counts) {
@@ -588,6 +608,7 @@ TEST(two_blobs_correct_pixel_counts) {
     ASSERT_EQ(blobs.size(), size_t(2));
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(2));
     ASSERT_EQ(blobs[1].pixel_count, uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(two_blobs_disjoint_coordinates) {
@@ -609,8 +630,10 @@ TEST(two_blobs_disjoint_coordinates) {
 // ============================================================================
 
 TEST(all_background_no_blobs) {
-    auto blobs = runChain(6, std::vector<uint8_t>(12, 0));
+    std::vector<uint8_t> grid(12, 0);
+    auto blobs = runChain(6, grid);
     ASSERT_EQ(blobs.size(), size_t(0));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(background_pixel_in_foreground_row_excluded) {
@@ -623,7 +646,8 @@ TEST(background_pixel_in_foreground_row_excluded) {
     auto blobs = runChain(4, grid);
     // Two isolated blobs (col gap = 2, no N/NW/NE bridge on row 0 alone)
     ASSERT_EQ(blobs.size(), size_t(2));
-    ASSERT_EQ(totalPixels(blobs), uint64_t(2));  // only 2 foreground pixels total
+    ASSERT_EQ(totalPixels(blobs), uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -641,6 +665,7 @@ TEST(three_isolated_blobs) {
     auto blobs = runChain(6, grid);
     ASSERT_EQ(blobs.size(), size_t(3));
     ASSERT_EQ(totalPixels(blobs), uint64_t(3));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(blobs_on_separate_rows) {
@@ -654,6 +679,7 @@ TEST(blobs_on_separate_rows) {
     };
     auto blobs = runChain(4, grid);
     ASSERT_EQ(blobs.size(), size_t(3));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -673,6 +699,7 @@ TEST(bounding_box_single_row_wide_blob) {
     ASSERT_EQ(blobs[0].left_col,  uint64_t(1));
     ASSERT_EQ(blobs[0].right_col, uint64_t(4));
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(4));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(bounding_box_multi_row_blob) {
@@ -690,10 +717,11 @@ TEST(bounding_box_multi_row_blob) {
     auto blobs = runChain(4, grid);
     ASSERT_EQ(blobs.size(), size_t(1));
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(6));
-    ASSERT_EQ(blobs[0].top_row,    uint64_t(0));
-    ASSERT_EQ(blobs[0].bottom_row, uint64_t(2));
-    ASSERT_EQ(blobs[0].left_col,   uint64_t(0));
-    ASSERT_EQ(blobs[0].right_col,  uint64_t(2));
+    ASSERT_EQ(blobs[0].top_row,     uint64_t(0));
+    ASSERT_EQ(blobs[0].bottom_row,  uint64_t(2));
+    ASSERT_EQ(blobs[0].left_col,    uint64_t(0));
+    ASSERT_EQ(blobs[0].right_col,   uint64_t(2));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 TEST(total_pixel_count_matches_foreground_count) {
@@ -705,12 +733,9 @@ TEST(total_pixel_count_matches_foreground_count) {
         1, 0, 1, 0,
         0, 1, 0, 1
     };
-    // Count foreground pixels manually
-    size_t fg = 0;
-    for (auto v : grid) if (v) ++fg;
-
     auto blobs = runChain(4, grid);
-    ASSERT_EQ(totalPixels(blobs), static_cast<uint64_t>(fg));
+    // Conservation: every foreground pixel is in exactly one blob.
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [SIMPLIFIED]
 }
 
 
@@ -719,33 +744,35 @@ TEST(total_pixel_count_matches_foreground_count) {
 // ============================================================================
 
 TEST(peak_active_never_exceeds_m_over_2) {
-    // Worst-case alternating pattern: m/2 blobs active simultaneously
     const size_t M = 20, ROWS = 50;
-    std::vector<uint8_t> grid(M * ROWS, 0);
+    std::vector<uint8_t> grid(M * ROWS, uint8_t(0));
     for (size_t r = 0; r < ROWS; ++r)
         for (size_t c = 0; c < M; c += 2)
             grid[r * M + c] = 1;
 
-    SimpleQueue<FilteredPacket> label_in;
-    SimpleQueue<LabelledPacket> trace_in;
+    SimpleQueue<FilteredPacket>  in_q;
+    SimpleQueue<LabelledPacket>  out_q;
 
     for (size_t r = 0; r < ROWS; ++r)
         for (size_t c = 0; c < M; c += 2) {
             FilteredPacket fp{};
             fp.b1 = grid[r*M+c]; fp.b2 = grid[r*M+c+1];
             fp.row = r; fp.col = c;
-            label_in.push(fp);
+            in_q.push(fp);
         }
 
     SystemConfig cfg = tracingConfig(M);
-    LabellingBlock labeller(cfg, label_in, trace_in);
+    LabellingBlock labeller(cfg, in_q, out_q);
     labeller.stop(); labeller.run();
 
     CaptureSink sink;
-    TracingBlock tracer(cfg, trace_in, sink);
+    TracingBlock tracer(cfg, out_q, sink);
     tracer.stop(); tracer.run();
 
     ASSERT_TRUE(tracer.peak_active_accumulators() <= M / 2);
+
+    // [ADDED] Conservation: all foreground pixels accounted for.
+    ASSERT_EQ(totalPixels(sink.blobs), totalForegroundPixels(grid));
 }
 
 TEST(total_pixels_conserved_across_blobs) {
@@ -756,11 +783,8 @@ TEST(total_pixels_conserved_across_blobs) {
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0
     };
-    size_t fg = 0;
-    for (auto v : grid) if (v) ++fg;
-
     auto blobs = runChain(M, grid);
-    ASSERT_EQ(totalPixels(blobs), static_cast<uint64_t>(fg));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -778,6 +802,7 @@ TEST(active_blobs_flushed_on_exit) {
     // Must have exactly one blob even though no recycle event was emitted.
     ASSERT_EQ(blobs.size(), size_t(1));
     ASSERT_EQ(blobs[0].pixel_count, uint64_t(4));
+    ASSERT_EQ(totalPixels(blobs), totalForegroundPixels(grid)); // [ADDED]
 }
 
 
@@ -809,24 +834,16 @@ TEST(threaded_pipeline_does_not_crash) {
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
-    generator.stop();
-    gen_t.join();
-
+    generator.stop(); gen_t.join();
     while (!gen_to_filter.empty()) std::this_thread::yield();
-    filter.stop();
-    flt_t.join();
-
+    filter.stop();    flt_t.join();
     while (!filter_to_label.empty()) std::this_thread::yield();
-    labeller.stop();
-    lab_t.join();
-
+    labeller.stop();  lab_t.join();
     while (!label_to_tracing.empty()) std::this_thread::yield();
-    tracer.stop();
-    trc_t.join();
+    tracer.stop();    trc_t.join();
 
     // At least some blobs should have been emitted from 50ms of random data.
     ASSERT_TRUE(tracer.blobs_completed() > 0 || tracer.packets_processed() > 0);
-    ASSERT_TRUE(true);  // no crash = pass
 }
 
 
@@ -837,6 +854,7 @@ TEST(threaded_pipeline_does_not_crash) {
 int main() {
     std::cout << "======================================================\n"
               << "  CynLr TracingBlock Test Suite\n"
+              << "  [+] Conservation invariant checks in all data tests\n"
               << "======================================================\n\n";
     return run_all_tests();
 }

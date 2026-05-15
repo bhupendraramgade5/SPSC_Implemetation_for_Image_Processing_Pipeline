@@ -37,6 +37,8 @@ cmake --build build --target CynLr_multiThread
 cmake --build build --target CynLr_Linear
 cmake --build build --target test_generator
 cmake --build build --target test_filter
+cmake --build build --target test_labelling
+cmake --build build --target test_tracing
 ```
 
 Build everything at once:
@@ -77,6 +79,8 @@ build\bin\CynLr_Linear.exe      --config=src\config.cfg --mode=csv
 ```bat
 build\bin\test_generator.exe
 build\bin\test_filter.exe
+build\bin\test_labelling.exe
+build\bin\test_tracing.exe
 ```
 
 ---
