@@ -101,6 +101,9 @@ SystemConfig ConfigManager::parseFile(const std::string& path) {
             config.write_output = (value == "true" || value == "1" || value == "yes");
         } else if (key == "output_file") {
             config.output_file = value;
+        // [ADDED] parse random_seed from config file
+        } else if (key == "random_seed") {
+            config.random_seed = static_cast<uint32_t>(std::stoul(value));
         }
         
     }
@@ -131,6 +134,9 @@ void ConfigManager::overrideWithCLI(SystemConfig& config, int argc, char** argv)
             config.write_output = true;
         } else if (arg.rfind("--output-file=", 0) == 0) {
             config.output_file = arg.substr(14);
+        // [ADDED] --seed=<N> CLI override
+        } else if (arg.rfind("--seed=", 0) == 0) {
+            config.random_seed = static_cast<uint32_t>(std::stoul(arg.substr(7)));
         }
         // --config=<path> is consumed in load() — ignore here
         // unknown flags: silently ignored
@@ -149,8 +155,7 @@ void ConfigManager::validate(SystemConfig& config) {
             throw std::runtime_error("Invalid config: columns (m) must be > 0");
         }
         if (config.columns < 2) {
-            throw std::runtime_error(
-                "Invalid config: columns (m) must be >= 2");
+            throw std::runtime_error("Invalid config: columns (m) must be >= 2");
         }
         if (config.columns % 2 != 0) {
             throw std::runtime_error(

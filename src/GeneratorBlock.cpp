@@ -66,7 +66,7 @@ std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
         return std::make_unique<CSVDataSource>(
             config.input_file, config.csv_mismatch_policy);
     }
-    return std::make_unique<RandomDataSource>(config.columns);
+    return std::make_unique<RandomDataSource>(config.columns, config.random_seed);
 }
 
 
@@ -87,12 +87,23 @@ std::unique_ptr<IDataSource> createDataSource(const SystemConfig& config) {
 //
 // next() always returns true — random data is infinite by definition.
 // ============================================================================
-
-RandomDataSource::RandomDataSource(size_t columns)
-    : columns_(columns), rng_(std::random_device{}()), dist_(0, 255)
+RandomDataSource::RandomDataSource(size_t columns, uint32_t seed)
+    : columns_(columns)
+    , rng_(seed != 0
+           ? std::mt19937(seed)                         // deterministic
+           : std::mt19937(std::random_device{}()))      // non-deterministic
+    , dist_(0, 255)
 {
     if (columns_ == 0)
         throw std::invalid_argument("RandomDataSource: columns must be > 0");
+
+    if (seed != 0) {
+        std::cout << "[RandomDataSource] Deterministic seed: " << seed
+                  << "  (reproduce with --seed=" << seed << ")\n";
+    } else {
+        std::cout << "[RandomDataSource] Non-deterministic seed (std::random_device)."
+                  << "  Use --seed=<N> to fix for reproduction.\n";
+    }
 }
 
 // Fills packet with two independent random values and the current coordinates,

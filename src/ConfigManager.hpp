@@ -54,9 +54,10 @@ struct SystemConfig {
     BoundaryPolicy    boundary_policy     = BoundaryPolicy::REPLICATE;
     CSVMismatchPolicy csv_mismatch_policy = CSVMismatchPolicy::REJECT;
 
-    // Output stage — parsed here, consumed by OutputWriter
-    bool        write_output = true;
+    // Output stage
+    bool        write_output = false;
     std::string output_file  = "output.csv";
+    uint32_t    random_seed = 0;
 };
 
 // -----------------------------

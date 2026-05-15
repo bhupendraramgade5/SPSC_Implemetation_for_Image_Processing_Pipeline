@@ -26,7 +26,9 @@
 
 class RandomDataSource : public IDataSource {
 public:
-    explicit RandomDataSource(size_t columns);
+    // [CHANGED] seed=0 → use std::random_device (non-deterministic, default).
+    //           seed≠0 → seed mt19937 deterministically for reproducible runs.
+    explicit RandomDataSource(size_t columns, uint32_t seed = 0);
 
     bool next(DataPacket& packet) override;
     size_t detectedColumns() const override { return columns_; }
@@ -34,8 +36,7 @@ public:
 private:
     void advance();
 
-private:
-    size_t columns_;
+    size_t   columns_;
     uint64_t row_ = 0;
     uint64_t col_ = 0;
 

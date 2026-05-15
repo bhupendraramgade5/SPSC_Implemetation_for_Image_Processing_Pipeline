@@ -378,7 +378,8 @@ TEST(labelmap_new_label_returns_0_when_full) {
 
 TEST(labelmap_recycle_frees_slot) {
     LabelMap lm(2);
-    // uint16_t a = lm.newLabel();   // 1
+    uint16_t a = lm.newLabel();   // 1
+    (void)a;  
     uint16_t b = lm.newLabel();   // 2
     ASSERT_TRUE(lm.full());
     lm.recycle(b);

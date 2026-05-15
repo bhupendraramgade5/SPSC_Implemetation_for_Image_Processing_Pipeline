@@ -177,8 +177,7 @@ static std::vector<CompletedBlob> runChain(
     SimpleQueue<FilteredPacket> label_in;
     SimpleQueue<LabelledPacket> trace_in;
 
-    const size_t total_pixels = rows_data.size();
-    const size_t total_rows   = total_pixels / columns;
+    const size_t total_rows = rows_data.size() / columns;
 
     for (size_t r = 0; r < total_rows; ++r) {
         for (size_t c = 0; c < columns; c += 2) {
@@ -854,7 +853,7 @@ TEST(threaded_pipeline_does_not_crash) {
 int main() {
     std::cout << "======================================================\n"
               << "  CynLr TracingBlock Test Suite\n"
-              << "  [+] Conservation invariant checks in all data tests\n"
+              << "  [+] Conservation invariant in all data tests\n"
               << "======================================================\n\n";
     return run_all_tests();
 }

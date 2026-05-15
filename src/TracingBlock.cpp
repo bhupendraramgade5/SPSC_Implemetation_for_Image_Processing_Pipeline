@@ -104,8 +104,7 @@ void TracingBlock::run() {
             const uint16_t root = label_map_.find(l);
             // Only emit once per root — skip aliases.
             if (root == l) {
-                const CompletedBlob blob = accumulators_[l].finalise(l);
-                output_.emit(blob);
+                output_.emit(accumulators_[l].finalise(l));
                 blobs_completed_.fetch_add(1, std::memory_order_relaxed);
                 accumulators_[l].reset();
             }
@@ -137,35 +136,23 @@ void TracingBlock::run() {
 // ============================================================================
 
 void TracingBlock::processPacket(const LabelledPacket& lp) {
+    // Step 1: merge events BEFORE pixel updates.
+    if (lp.merge_old  != 0) applyMerge(lp.merge_old,  lp.merge_new);
+    if (lp.merge_old2 != 0) applyMerge(lp.merge_old2, lp.merge_new2);
 
-    // --- Step 1: Apply merge events ---
-    // Two merge slots per packet (one per pixel).  Both may fire.
-    if (lp.merge_old != 0)
-        applyMerge(lp.merge_old, lp.merge_new);
-    if (lp.merge_old2 != 0)
-        applyMerge(lp.merge_old2, lp.merge_new2);
-
-    // --- Step 2: Apply recycle event ---
-    if (lp.recycled != 0)
-        applyRecycle(lp.recycled);
+    // Step 2: recycle event BEFORE pixel updates.
+    if (lp.recycled != 0) applyRecycle(lp.recycled);
 
     // --- Step 3: Update pixel 1 (l1 at column lp.col) ---
     if (lp.l1 != 0) {
         const uint16_t root = resolveLabel(lp.l1);
-        if (root != 0) {
-            updatePixel(root, lp.row, lp.col);
-        }
+        if (root != 0) updatePixel(root, lp.row, lp.col);
     }
 
-    // --- Step 4: Update pixel 2 (l2 at column lp.col + 1) ---
-    // l2 == 0 when b2 was a padding artifact (FilterBlock sets label=0
-    // for padding pixels in LabellingBlock's input).  The guard handles
-    // this naturally — no special is_pad check needed here.
+    // Step 4: pixel 2.
     if (lp.l2 != 0) {
         const uint16_t root = resolveLabel(lp.l2);
-        if (root != 0) {
-            updatePixel(root, lp.row, lp.col + 1);
-        }
+        if (root != 0) updatePixel(root, lp.row, lp.col + 1);
     }
 }
 
@@ -259,12 +246,16 @@ void TracingBlock::applyRecycle(uint16_t recycled) noexcept {
 
     const uint16_t root = label_map_.find(recycled);
 
-    if (root != 0 && root < static_cast<uint16_t>(accumulators_.size())) {
-        // Emit only if the accumulator has seen at least one pixel.
-        // Zero-pixel blobs are suppressed to keep the output clean.
+    // [FIXED] Only emit when the recycled label IS the canonical root.
+    // If root != recycled, this label was merged under another — do not
+    // emit the surviving root's accumulator prematurely.  The root will
+    // receive its own recycle notification when it is truly dead.
+    if (root == recycled &&
+        root != 0 &&
+        root < static_cast<uint16_t>(accumulators_.size()))
+    {
         if (accumulators_[root].active) {
-            const CompletedBlob blob = accumulators_[root].finalise(root);
-            output_.emit(blob);
+            output_.emit(accumulators_[root].finalise(root));
             blobs_completed_.fetch_add(1, std::memory_order_relaxed);
         }
         accumulators_[root].reset();
@@ -272,18 +263,6 @@ void TracingBlock::applyRecycle(uint16_t recycled) noexcept {
 
     // Free the label slot in the local map.
     label_map_.recycle(recycled);
-    if (recycled != root && root != 0) {
-        // Root and alias are distinct — also recycle the root if it equals
-        // the canonical root (it will, since unite() chains all aliases to
-        // the root).  Calling recycle() twice on the same label is safe —
-        // the second call just pushes a duplicate onto free_.  To avoid this,
-        // only recycle root if root != recycled.
-        // In practice, LabellingBlock emits only ONE recycle notification per
-        // logical blob (the canonical root's ID), so this branch is rarely
-        // taken.  The duplicate-recycle risk is low but not zero.
-        // TODO: Future hardening — track which roots have been recycled to
-        // prevent the double-push edge case.
-    }
 
     // Update peak diagnostic.
     const size_t current_active = countActive();
