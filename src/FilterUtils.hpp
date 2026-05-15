@@ -1,37 +1,70 @@
 #ifndef FILTER_UTILS_HPP
 #define FILTER_UTILS_HPP
 
+
 #include "ConfigManager.hpp"
-#include <cstdint>
-#include <vector>
-#include <stdexcept>
+
 #include <algorithm>
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
 struct FilteredPacket {
     uint8_t  b1  = 0;
     uint8_t  b2  = 0;
-    uint64_t row = 0;
-    uint64_t col = 0;
-
-    #ifdef CYNLR_PERF_BUILD
-    uint64_t t1=0;
-    uint64_t t2=0;
-    #endif
+    uint8_t  flags = 0;    // bit 0: FP_FLAG_B2_IS_PAD
+    uint8_t  _pad  = 0;    // explicit pad byte; compiler adds 4 more before row
+    // 4 bytes of implicit compiler padding here (aligns row to offset 8)
+    uint64_t row   = 0;
+    uint64_t col   = 0;
+#ifdef CYNLR_PERF_BUILD
+    uint64_t t1    = 0;     // staging timestamp for b1 (nanoseconds)
+    uint64_t t2    = 0;     // staging timestamp for b2 (nanoseconds)
+#endif
 };
 
-inline uint8_t applyLeft(BoundaryPolicy policy, uint8_t edge, size_t /*offset*/) {
+// Bit definitions for FilteredPacket::flags
+static constexpr uint8_t FP_FLAG_B2_IS_PAD = 0x01;  // b2 is row-end padding, not a real pixel
+
+// Layout: b1(1)+b2(1)+flags(1)+_pad(1)+implicit_pad(4) = 8 bytes header,
+//         then row(8)+col(8) → sizeof == 24.
+#ifdef CYNLR_PERF_BUILD
+static_assert(sizeof(FilteredPacket) == 40,
+    "FilteredPacket (PERF build) layout changed -- "
+    "expected 24-byte base + 16 bytes for t1/t2 = 40 bytes total. "
+    "Update this assert and the layout comment above if the change is intentional.");
+#else
+static_assert(sizeof(FilteredPacket) == 24,
+    "FilteredPacket (non-PERF build) layout changed -- "
+    "expected b1+b2+flags+_pad (4) + implicit_pad (4) + row+col (16) = 24 bytes. "
+    "Update this assert and the layout comment above if the change is intentional.");
+#endif
+
+
+// ============================================================================
+// applyLeft / applyRight
+// ----------------------------------------------------------------------------
+// Boundary padding helpers used by FilterBlock and InlineLinearFilter.
+// ============================================================================
+
+inline uint8_t applyLeft(BoundaryPolicy policy,
+                         uint8_t        edge,
+                         size_t       /*offset*/) {
     switch (policy) {
         case BoundaryPolicy::REPLICATE: return edge;
         case BoundaryPolicy::ZERO_PAD:  return 0;
         default:
-            throw std::runtime_error("BoundaryPolicy: unknown policy");
+            throw std::runtime_error("applyLeft: unknown BoundaryPolicy");
     }
 }
-inline uint8_t applyRight(BoundaryPolicy policy, uint8_t edge, size_t /*offset*/) {
+
+inline uint8_t applyRight(BoundaryPolicy policy,
+                          uint8_t        edge,
+                          size_t       /*offset*/) {
     switch (policy) {
         case BoundaryPolicy::REPLICATE: return edge;
         case BoundaryPolicy::ZERO_PAD:  return 0;
         default:
-            throw std::runtime_error("BoundaryPolicy: unknown policy");
+            throw std::runtime_error("applyRight: unknown BoundaryPolicy");
     }
 }
 struct WindowSlot {

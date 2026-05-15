@@ -33,6 +33,7 @@
 #include "GeneratorBlock.hpp"   // IDataSource, createDataSource
 #include "FilterUtils.hpp"      // SlidingWindow, FilteredPacket, applyLeft/Right
 #include "LabellingUtils.hpp"   // LabelledPacket, LabelMap, RowLabelBuffer
+#include "TracingUtils.hpp"     // BlobAccumulator, CompletedBlob           Phase 4
 #include "Queue.hpp"            // DataPacket
 #include "OutputWriter.hpp"     // IOutputWriter, makeOutputWriter
 #include "PerfTest.hpp"         // LinearStats, computeLinearStats, printLinearStats
@@ -117,6 +118,7 @@ public:
         if (pending_.has_b1 && !pending_.has_b2) {
             FilteredPacket fp;
             fp.b1 = pending_.b1; fp.b2 = 0;
+            fp.flags = FP_FLAG_B2_IS_PAD;   // Phase 4: mark padding b2
             fp.row = pending_.row; fp.col = pending_.col;
             out.push_back(fp);
             pending_ = PendingOutput{};
@@ -195,10 +197,14 @@ public:
         uint16_t mo1=0, mn1=0;
         const uint16_t l1 = assignLabel(fp.b1 != 0, fp.col,     mo1, mn1);
 
+        // If b2 is a padding artifact, treat it as background for labelling.
+        const bool b2_is_pad = (fp.flags & FP_FLAG_B2_IS_PAD) != 0;
         uint16_t mo2=0, mn2=0;
-        const uint16_t l2 = assignLabel(fp.b2 != 0, fp.col + 1, mo2, mn2);
+        const uint16_t l2 = b2_is_pad
+                          ? uint16_t(0)
+                          : assignLabel(fp.b2 != 0, fp.col + 1, mo2, mn2);
 
-        last_col_ = fp.col + 1;
+        last_col_ = fp.col + (b2_is_pad ? 0 : 1);
         drainMidRow(last_col_);
 
         LabelledPacket out;
@@ -304,6 +310,122 @@ private:
 
 
 // ============================================================================
+// InlineLinearTracer                                                Phase 4
+// ----------------------------------------------------------------------------
+// Single-threaded equivalent of TracingBlock.  Owns its own LabelMap
+// (mirroring LinearLabeller's map via merge events) and a flat array of
+// BlobAccumulator indexed by label ID.
+//
+// Interface:
+//   assignPacket(lp, out)  — process one LabelledPacket.
+//                            Appends completed CompletedBlobs to `out` when
+//                            a recycle event fires.
+//   flush(out)             — emit all still-active accumulators as blobs.
+//                            Called once after the last packet of the stream.
+//
+// Design mirrors TracingBlock::processPacket() exactly, with the difference
+// that output goes to a local std::vector<CompletedBlob> rather than a queue.
+// This keeps I/O out of the timed loop — the caller writes blobs to CSV after
+// the timestamp is recorded.
+// ============================================================================
+
+class InlineLinearTracer {
+public:
+    explicit InlineLinearTracer(const SystemConfig& cfg)
+        : max_labels_(cfg.columns / 2)
+        , accumulators_(cfg.columns / 2 + 1)  // index [0..max_labels]
+        , label_map_(cfg.columns / 2)
+    {}
+
+    // Process one LabelledPacket.  Appends any CompletedBlobs triggered by
+    // recycle events to `out`.  `out` is cleared by the caller between calls
+    // if it wants per-packet results; left uncleaned for batched processing.
+    void assignPacket(const LabelledPacket& lp,
+                      std::vector<CompletedBlob>& out) noexcept
+    {
+        // Step 1: merge events
+        if (lp.merge_old  != 0) applyMerge(lp.merge_old,  lp.merge_new);
+        if (lp.merge_old2 != 0) applyMerge(lp.merge_old2, lp.merge_new2);
+
+        // Step 2: recycle event
+        if (lp.recycled != 0) applyRecycle(lp.recycled, out);
+
+        // Step 3: update pixel 1
+        if (lp.l1 != 0) {
+            const uint16_t root = label_map_.find(lp.l1);
+            if (root && root <= max_labels_)
+                accumulators_[root].update(lp.row, lp.col);
+        }
+
+        // Step 4: update pixel 2 (l2==0 for padding — guard handles it)
+        if (lp.l2 != 0) {
+            const uint16_t root = label_map_.find(lp.l2);
+            if (root && root <= max_labels_)
+                accumulators_[root].update(lp.row, lp.col + 1);
+        }
+    }
+
+    // Emit all still-active accumulators as blobs.
+    // Call once after the main loop to handle blobs that reached end-of-stream
+    // without a recycle event (e.g. a blob that touches the last row of a CSV).
+    void flush(std::vector<CompletedBlob>& out) noexcept {
+        for (uint16_t l = 1; l <= static_cast<uint16_t>(max_labels_); ++l) {
+            if (!accumulators_[l].active) continue;
+            // Only emit canonical roots to avoid double-emitting aliases.
+            if (label_map_.find(l) == l) {
+                out.push_back(accumulators_[l].finalise(l));
+                accumulators_[l].reset();
+            }
+        }
+    }
+
+    // Number of blobs emitted so far (via recycle events, not including flush).
+    uint64_t blobs_completed() const noexcept { return blobs_completed_; }
+
+    size_t peak_active() const noexcept { return peak_active_; }
+
+private:
+    void applyMerge(uint16_t mo, uint16_t mn) noexcept {
+        const uint16_t ro = label_map_.find(mo);
+        const uint16_t rn = label_map_.find(mn);
+        if (ro == rn) return;
+
+        const uint16_t surv = std::min(ro, rn);
+        const uint16_t abs  = std::max(ro, rn);
+
+        label_map_.unite(ro, rn);
+
+        if (abs <= max_labels_ && surv <= max_labels_) {
+            accumulators_[surv].merge(accumulators_[abs]);
+            accumulators_[abs].reset();
+        }
+    }
+
+    void applyRecycle(uint16_t recycled,
+                      std::vector<CompletedBlob>& out) noexcept {
+        const uint16_t root = label_map_.find(recycled);
+        if (root && root <= max_labels_ && accumulators_[root].active) {
+            out.push_back(accumulators_[root].finalise(root));
+            accumulators_[root].reset();
+            ++blobs_completed_;
+        }
+        label_map_.recycle(recycled);
+
+        // Track peak active
+        size_t active = 0;
+        for (const auto& a : accumulators_) if (a.active) ++active;
+        if (active > peak_active_) peak_active_ = active;
+    }
+
+    size_t                       max_labels_;
+    std::vector<BlobAccumulator> accumulators_;
+    LabelMap                     label_map_;
+    uint64_t                     blobs_completed_ = 0;
+    size_t                       peak_active_     = 0;
+};
+
+
+// ============================================================================
 // main
 // ============================================================================
 
@@ -334,7 +456,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "========================================\n"
-              << " CynLr Linear Pipeline  (single thread, 3 stages)\n"
+              << " CynLr Linear Pipeline  (single thread, 4 stages)\n"
               << "========================================\n"
               << " Mode             : " << config.mode         << "\n"
               << " Columns (m)      : " << config.columns      << "\n"
@@ -351,17 +473,32 @@ int main(int argc, char** argv) {
     else                      std::cout << config.max_rows << "\n";
     std::cout << "========================================\n\n";
 
-    // ---- 2. Build stages -------------------------------------------------
-    InlineLinearFilter filter (config);
-    LinearLabeller     labeller(config);
+    // -------------------------------------------------------------------------
+    // 2. Build stages
+    // -------------------------------------------------------------------------
+    InlineLinearFilter  filter  (config);
+    LinearLabeller      labeller(config);
+    InlineLinearTracer  tracer  (config);   // Phase 4
 
-    // Optional CSV output for labelled packets
-    std::ofstream out_csv;
+    // -------------------------------------------------------------------------
+    // 3. Optional output files
+    //    - Labelled-packet CSV  (same as Phase 3)
+    //    - Blob CSV             (Phase 4: one row per completed blob)
+    // -------------------------------------------------------------------------
+    std::ofstream out_label_csv;
+    std::ofstream out_blob_csv;
+
     if (config.write_output) {
-        out_csv.open(config.output_file, std::ios::out | std::ios::trunc);
-        if (out_csv.is_open())
-            out_csv << "row,col,l1,l2,merge_old,merge_new,"
-                       "merge_old2,merge_new2,recycled\n";
+        out_label_csv.open(config.output_file, std::ios::out | std::ios::trunc);
+        if (out_label_csv.is_open())
+            out_label_csv << "row,col,l1,l2,merge_old,merge_new,"
+                             "merge_old2,merge_new2,recycled\n";
+
+        const std::string blob_path = config.output_file + "_blobs.csv";
+        out_blob_csv.open(blob_path, std::ios::out | std::ios::trunc);
+        if (out_blob_csv.is_open())
+            out_blob_csv << "label,pixel_count,top_row,bottom_row,"
+                            "left_col,right_col,width,height\n";
     }
 
     // 3. Timing & stats storage
@@ -374,12 +511,77 @@ int main(int argc, char** argv) {
     size_t merge_events  = 0;
     size_t recycle_events= 0;
     uint64_t rows_done   = 0;
+    uint64_t blobs_total    = 0;    // Phase 4
 
     const auto deadline =
         (config.run_duration_ms > 0)
             ? std::chrono::steady_clock::now()
                 + std::chrono::milliseconds(config.run_duration_ms)
             : std::chrono::steady_clock::time_point::max();
+
+    // Helper: write one LabelledPacket row to the label CSV
+    auto writeLabelCSV = [&](const LabelledPacket& lp) {
+        if (!out_label_csv.is_open()) return;
+        out_label_csv << lp.row        << ','
+                      << lp.col        << ','
+                      << lp.l1         << ','
+                      << lp.l2         << ','
+                      << lp.merge_old  << ','
+                      << lp.merge_new  << ','
+                      << lp.merge_old2 << ','
+                      << lp.merge_new2 << ','
+                      << lp.recycled   << '\n';
+    };
+
+    // Helper: write one CompletedBlob row to the blob CSV           Phase 4
+    auto writeBlobCSV = [&](const CompletedBlob& b) {
+        if (!out_blob_csv.is_open()) return;
+        const uint64_t w = (b.right_col  >= b.left_col)
+                         ? (b.right_col  - b.left_col  + 1) : 0;
+        const uint64_t h = (b.bottom_row >= b.top_row)
+                         ? (b.bottom_row - b.top_row   + 1) : 0;
+        out_blob_csv << b.label        << ','
+                     << b.pixel_count  << ','
+                     << b.top_row      << ','
+                     << b.bottom_row   << ','
+                     << b.left_col     << ','
+                     << b.right_col    << ','
+                     << w              << ','
+                     << h              << '\n';
+    };
+
+    // Helper: process one LabelledPacket through all downstream stages
+    // (tracer, CSV writers, stats, timestamp).
+    // Extracted to avoid duplicating the identical block at three call sites
+    // (v1, v2, and flush results).
+    std::vector<CompletedBlob> completed_blobs;   // reused per packet
+
+    auto processLabelledPacket = [&](const LabelledPacket& lp) {
+        // ---- Tracer (Phase 4) ----
+        completed_blobs.clear();
+        tracer.assignPacket(lp, completed_blobs);
+        for (const auto& b : completed_blobs) {
+            writeBlobCSV(b);
+            ++blobs_total;
+        }
+
+        // ---- Label CSV ----
+        writeLabelCSV(lp);
+
+        // ---- Timestamp (one per output FilteredPacket = two pixels) ----
+        const uint64_t ts = static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        pixel_timestamps.push_back(ts);
+        pixel_timestamps.push_back(ts);
+
+        // ---- Pixel-level stats ----
+        if (lp.l1) ++foreground; else ++background;
+        if (lp.l2) ++foreground; else ++background;
+        if (lp.merge_old  != 0) ++merge_events;
+        if (lp.merge_old2 != 0) ++merge_events;
+        if (lp.recycled   != 0) ++recycle_events;
+        total_pixels += 2;
+    };
 
     // -------------------------------------------------------------------------
     // 4. Single-thread pipeline loop
@@ -406,27 +608,8 @@ int main(int argc, char** argv) {
                 filter.flush(last_val, prev_row, last_col, flush_fps);
 
                 for (const auto& ffp : flush_fps) {
-                    // Pass each flushed FilteredPacket through labeller
-                    LabelledPacket lp = labeller.assignPacket(ffp);
-
-                    if (out_csv.is_open())
-                        out_csv << lp.row << ',' << lp.col << ','
-                                << lp.l1  << ',' << lp.l2  << ','
-                                << lp.merge_old  << ',' << lp.merge_new  << ','
-                                << lp.merge_old2 << ',' << lp.merge_new2 << ','
-                                << lp.recycled   << '\n';
-
-                    const uint64_t ts = static_cast<uint64_t>(
-                        std::chrono::steady_clock::now().time_since_epoch().count());
-                    pixel_timestamps.push_back(ts);
-                    pixel_timestamps.push_back(ts);
-
-                    if (lp.l1) ++foreground; else ++background;
-                    if (lp.l2) ++foreground; else ++background;
-                    if (lp.merge_old  != 0) ++merge_events;
-                    if (lp.merge_old2 != 0) ++merge_events;
-                    if (lp.recycled   != 0) ++recycle_events;
-                    total_pixels += 2;
+                    const LabelledPacket lp = labeller.assignPacket(ffp);
+                    processLabelledPacket(lp);
                 }
                 ++rows_done;
             }
@@ -438,50 +621,14 @@ int main(int argc, char** argv) {
         FilteredPacket fp;
 
         if (filter.processSample(packet.v1, packet.row, packet.col, fp)) {
-            LabelledPacket lp = labeller.assignPacket(fp);
-
-            if (out_csv.is_open())
-                out_csv << lp.row << ',' << lp.col << ','
-                        << lp.l1  << ',' << lp.l2  << ','
-                        << lp.merge_old  << ',' << lp.merge_new  << ','
-                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
-                        << lp.recycled   << '\n';
-
-            const uint64_t ts = static_cast<uint64_t>(
-                std::chrono::steady_clock::now().time_since_epoch().count());
-            pixel_timestamps.push_back(ts);
-            pixel_timestamps.push_back(ts);
-
-            if (lp.l1) ++foreground; else ++background;
-            if (lp.l2) ++foreground; else ++background;
-            if (lp.merge_old  != 0) ++merge_events;
-            if (lp.merge_old2 != 0) ++merge_events;
-            if (lp.recycled   != 0) ++recycle_events;
-            total_pixels += 2;
+            const LabelledPacket lp = labeller.assignPacket(fp);
+            processLabelledPacket(lp);
         }
 
         // --- Filter pixel 2 --------------------------------------------------
         if (filter.processSample(packet.v2, packet.row, packet.col + 1, fp)) {
-            LabelledPacket lp = labeller.assignPacket(fp);
-
-            if (out_csv.is_open())
-                out_csv << lp.row << ',' << lp.col << ','
-                        << lp.l1  << ',' << lp.l2  << ','
-                        << lp.merge_old  << ',' << lp.merge_new  << ','
-                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
-                        << lp.recycled   << '\n';
-
-            const uint64_t ts = static_cast<uint64_t>(
-                std::chrono::steady_clock::now().time_since_epoch().count());
-            pixel_timestamps.push_back(ts);
-            pixel_timestamps.push_back(ts);
-
-            if (lp.l1) ++foreground; else ++background;
-            if (lp.l2) ++foreground; else ++background;
-            if (lp.merge_old  != 0) ++merge_events;
-            if (lp.merge_old2 != 0) ++merge_events;
-            if (lp.recycled   != 0) ++recycle_events;
-            total_pixels += 2;
+            const LabelledPacket lp = labeller.assignPacket(fp);
+            processLabelledPacket(lp);
         }
 
         last_val = packet.v2;
@@ -494,45 +641,39 @@ int main(int argc, char** argv) {
         filter.flush(last_val, prev_row, last_col, flush_fps);
 
         for (const auto& ffp : flush_fps) {
-            LabelledPacket lp = labeller.assignPacket(ffp);
-
-            if (out_csv.is_open())
-                out_csv << lp.row << ',' << lp.col << ','
-                        << lp.l1  << ',' << lp.l2  << ','
-                        << lp.merge_old  << ',' << lp.merge_new  << ','
-                        << lp.merge_old2 << ',' << lp.merge_new2 << ','
-                        << lp.recycled   << '\n';
-
-            const uint64_t ts = static_cast<uint64_t>(
-                std::chrono::steady_clock::now().time_since_epoch().count());
-            pixel_timestamps.push_back(ts);
-            pixel_timestamps.push_back(ts);
-
-            if (lp.l1) ++foreground; else ++background;
-            if (lp.l2) ++foreground; else ++background;
-            if (lp.merge_old  != 0) ++merge_events;
-            if (lp.merge_old2 != 0) ++merge_events;
-            if (lp.recycled   != 0) ++recycle_events;
-            total_pixels += 2;
+            const LabelledPacket lp = labeller.assignPacket(ffp);
+            processLabelledPacket(lp);
         }
         ++rows_done;
         labeller.flushFinalRow();
     }
 
-    if (out_csv.is_open()) {
-        out_csv.flush();
-        out_csv.close();
+    // Emit all still-active blobs (those that never received a recycle event
+    // because they touched the last row of the input).
+    {
+        std::vector<CompletedBlob> final_blobs;
+        tracer.flush(final_blobs);
+        for (const auto& b : final_blobs) {
+            writeBlobCSV(b);
+            ++blobs_total;
+        }
     }
 
     // -------------------------------------------------------------------------
     // 5. Compute and print stats
+    // -------------------------------------------------------------------------
+    if (out_label_csv.is_open()) { out_label_csv.flush(); out_label_csv.close(); }
+    if (out_blob_csv.is_open())  { out_blob_csv.flush();  out_blob_csv.close();  }
+
+    // -------------------------------------------------------------------------
+    // 8. Performance report
     // -------------------------------------------------------------------------
     LinearStats stats = computeLinearStats(pixel_timestamps);
     printLinearStats(stats, config.cycle_time_ns);
 
     // 6. Performance report
     std::cout << "========================================\n"
-              << " Pipeline Summary  (linear, 3 stages)\n"
+              << " Pipeline Summary  (linear, 4 stages)\n"
               << "========================================\n"
               << " Rows processed       : " << rows_done              << "\n"
               << " Output pixels        : " << total_pixels           << "\n"
@@ -540,10 +681,17 @@ int main(int argc, char** argv) {
               << " Background (label=0) : " << background             << "\n"
               << " Merge events         : " << merge_events           << "\n"
               << " Recycle events       : " << recycle_events         << "\n"
+              << "\n"
+              << " Blobs completed      : " << blobs_total            << "\n"
               << " Peak active labels   : " << labeller.peak_active_labels()
-              << " / " << (config.columns / 2) << " (m/2)\n"
+              <<   " / " << (config.columns / 2) << " (m/2)\n"
+              << " Peak active accum.   : " << tracer.peak_active()
+              <<   " / " << (config.columns / 2) << " (m/2)\n"
               << " Memory OK            : "
-              << (labeller.peak_active_labels() <= config.columns / 2 ? "YES" : "NO")
+              << ((labeller.peak_active_labels() <= config.columns / 2 &&
+                   tracer.peak_active()          <= config.columns / 2)
+                      ? "YES" : "NO")
+              << "\n"
               << "\n"
               << " Shutdown cause       : ";
 
@@ -557,12 +705,11 @@ int main(int argc, char** argv) {
         std::cout << "source exhausted (CSV)\n";
 
     std::cout << "\n"
-              << " Threaded avg gap (Phase 1): ~280-530 ns\n"
-              << " Linear   avg gap (Phase 1):  ~144 ns\n"
-              << " Linear   avg gap (Phase 3):  " << stats.avg_ns << " ns\n"
-              << " Labelling overhead est.   :  "
+              << " Phase 1 linear avg (filter only) :  ~144 ns\n"
+              << " Phase 4 linear avg (all 4 stages):  " << stats.avg_ns << " ns\n"
+              << " Phase 4 overhead vs Phase 1       :  "
               << (stats.avg_ns > 144.0 ? stats.avg_ns - 144.0 : 0.0)
-              << " ns/pixel\n"
+              << " ns/pixel  (label + trace)\n"
               << "========================================\n\n";
 
     return EXIT_SUCCESS;
