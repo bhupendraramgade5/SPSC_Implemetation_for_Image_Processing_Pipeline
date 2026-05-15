@@ -230,15 +230,15 @@ static bool allSameLabel(const std::vector<uint16_t>& labels,
 }
 
 // Write a temporary CSV file and return its path.
-static std::string writeTempCSV(const std::string& content,
-                                const std::string& filename = "cynlr_lab_test.csv")
-{
-    const auto path = std::filesystem::temp_directory_path() / filename;
-    std::ofstream f(path);
-    if (!f) throw std::runtime_error("Cannot create temp CSV: " + path.string());
-    f << content;
-    return path.string();
-}
+// static std::string writeTempCSV(const std::string& content,
+//                                 const std::string& filename = "cynlr_lab_test.csv")
+// {
+//     const auto path = std::filesystem::temp_directory_path() / filename;
+//     std::ofstream f(path);
+//     if (!f) throw std::runtime_error("Cannot create temp CSV: " + path.string());
+//     f << content;
+//     return path.string();
+// }
 
 
 // ============================================================================
@@ -378,7 +378,7 @@ TEST(labelmap_new_label_returns_0_when_full) {
 
 TEST(labelmap_recycle_frees_slot) {
     LabelMap lm(2);
-    uint16_t a = lm.newLabel();   // 1
+    // uint16_t a = lm.newLabel();   // 1
     uint16_t b = lm.newLabel();   // 2
     ASSERT_TRUE(lm.full());
     lm.recycle(b);
