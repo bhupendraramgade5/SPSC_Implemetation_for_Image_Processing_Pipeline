@@ -21,6 +21,7 @@
 #include <chrono>
 #include <iomanip>
 #include <csignal>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -164,6 +165,10 @@ int main(int argc, char** argv) {
     DynamicSPSCQueue<FilteredPacket> filter_to_label (queue_depth, queue_depth);
     DynamicSPSCQueue<LabelledPacket> label_to_tracing(queue_depth, queue_depth); // Phase 4
 
+#ifdef CYNLR_PERF_BUILD
+    // PERF observer side-channel queue
+    SimpleQueue<FilteredPacket> perf_queue;
+#endif
 
 
     // Generator: owns its data source (CSV or random), injected via factory
@@ -188,11 +193,16 @@ int main(int argc, char** argv) {
                              gen_to_filter,
                              std::move(data_source));
 
-    FilterBlock filter(config,
-                       gen_to_filter,
-                       filter_to_label,
-                       config.threshold,
-                       config.boundary_policy);
+    FilterBlock filter(
+        config,
+        gen_to_filter,
+        filter_to_label,
+        config.threshold,
+        config.boundary_policy
+#ifdef CYNLR_PERF_BUILD
+        , &perf_queue
+#endif
+    );
 
     LabellingBlock labeller(config,
                             filter_to_label,
@@ -243,10 +253,65 @@ int main(int argc, char** argv) {
     // tracing_output destructor / flush() is called when unique_ptr goes out
     // of scope at end of main() — all buffered blobs are written to disk here.
 
-    // ---- 9. Pipeline summary -------------------------------------------
-    const std::size_t gen_filt_peak  = gen_to_filter.peak_occupancy();
-    const std::size_t filt_lab_peak  = filter_to_label.peak_occupancy();
-    const std::size_t lab_trac_peak  = label_to_tracing.peak_occupancy(); // Phase 4
+#ifdef CYNLR_PERF_BUILD
+    {
+        std::vector<uint64_t> gaps;
+        gaps.reserve(1 << 20);
+
+        bool     has_prev = false;
+        uint64_t prev     = 0;
+
+        FilteredPacket fp;
+
+        while (perf_queue.pop(fp)) {
+
+            // Gap before first pixel
+            if (has_prev)
+                gaps.push_back(fp.t1 - prev);
+
+            prev     = fp.t1;
+            has_prev = true;
+
+            // Gap between pixel1 -> pixel2
+            gaps.push_back(fp.t2 - prev);
+
+            prev = fp.t2;
+        }
+
+        auto stats = computePerfStats(gaps);
+
+        std::cout << "\n========================================\n"
+                  << " Performance Report\n"
+                  << "========================================\n"
+                  << " Samples       : " << stats.count << "\n"
+                  << " Min gap (ns)  : " << stats.min_gap << "\n"
+                  << " Max gap (ns)  : " << stats.max_gap << "\n"
+                  << " Avg gap (ns)  : " << stats.avg_gap << "\n"
+                  << " P99 gap (ns)  : " << stats.p99_gap << "\n"
+                  << " Requirement   : gap <= T ("
+                  << config.cycle_time_ns
+                  << " ns)\n"
+                  << " RESULT        : "
+                  << (stats.max_gap <= config.cycle_time_ns
+                        ? "PASS"
+                        : "FAIL")
+                  << "\n"
+                  << "========================================\n";
+    }
+#endif
+
+    // -----------------------------------------------------------------------
+    // 9. Pipeline summary
+    // -----------------------------------------------------------------------
+
+    const std::size_t gen_filt_peak =
+        gen_to_filter.peak_occupancy();
+
+    const std::size_t filt_lab_peak =
+        filter_to_label.peak_occupancy();
+
+    const std::size_t lab_trac_peak =
+        label_to_tracing.peak_occupancy();
 
     const bool memory_ok =
         (gen_filt_peak  <= queue_depth) &&
@@ -256,28 +321,42 @@ int main(int argc, char** argv) {
     std::cout << "\n========================================\n"
               << " Pipeline Summary  (4 stages)\n"
               << "========================================\n"
-              << " Rows generated       : " << generator.rows_emitted()  << "\n"
-              << " Packets dropped      : " << generator.dropped_packets();
+              << " Rows generated       : "
+              << generator.rows_emitted() << "\n"
+              << " Packets dropped      : "
+              << generator.dropped_packets();
+
     if (generator.dropped_packets() > 0)
-        std::cout << "  <- T too tight; increase T or reduce m";
-    std::cout << "\n"
+        std::cout
+            << "  <- T too tight; increase T or reduce m";
+
+    std::cout << "\n\n"
+              << " Tracing packets      : "
+              << tracer.packets_processed() << "\n"
+              << " Blobs completed      : "
+              << tracer.blobs_completed() << "\n"
+              << " Peak active labels   : "
+              << tracer.peak_active_accumulators()
+              << " / " << queue_depth << " (m/2)\n"
               << "\n"
-              << " Tracing packets      : " << tracer.packets_processed()        << "\n"
-              << " Blobs completed      : " << tracer.blobs_completed()          << "\n"
-              << " Peak active labels   : " << tracer.peak_active_accumulators()
-              <<   " / " << queue_depth << " (m/2)\n"
+              << " Queue gen->filter     : peak="
+              << gen_filt_peak
+              << " / " << queue_depth
+              << "  cap=" << gen_to_filter.capacity()
               << "\n"
-              << " Queue gen→filter     : peak=" << gen_filt_peak
-              <<   " / " << queue_depth << " (m/2 limit)"
-              <<   "  cap=" << gen_to_filter.capacity()    << "\n"
-              << " Queue filter→label   : peak=" << filt_lab_peak
-              <<   " / " << queue_depth << " (m/2 limit)"
-              <<   "  cap=" << filter_to_label.capacity()  << "\n"
-              << " Queue label→tracing  : peak=" << lab_trac_peak           // Phase 4
-              <<   " / " << queue_depth << " (m/2 limit)"
-              <<   "  cap=" << label_to_tracing.capacity() << "\n"
-              << " Memory OK (all)      : " << (memory_ok ? "YES" : "NO")  << "\n"
+              << " Queue filter->label   : peak="
+              << filt_lab_peak
+              << " / " << queue_depth
+              << "  cap=" << filter_to_label.capacity()
               << "\n"
+              << " Queue label->tracing  : peak="
+              << lab_trac_peak
+              << " / " << queue_depth
+              << "  cap=" << label_to_tracing.capacity()
+              << "\n"
+              << " Memory OK (all)      : "
+              << (memory_ok ? "YES" : "NO")
+              << "\n\n"
               << " Shutdown cause       : ";
 
     if (g_shutdown_requested.load())

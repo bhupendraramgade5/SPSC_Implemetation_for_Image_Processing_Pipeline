@@ -23,15 +23,22 @@
 FilterBlock::FilterBlock(const SystemConfig&           config,
                          IQueue<DataPacket>&           in_queue,
                          IQueue<FilteredPacket>&       out_queue,
-                         uint8_t                   threshold,
-                         BoundaryPolicy                policy)
-    : config_(config)
-    , in_queue_(in_queue)
-    , out_queue_(out_queue)
-    , threshold_(static_cast<float>(threshold))
-    , policy_(policy)
-    , window_(config.kernel.size())           // ring buffer sized from kernel
-    , half_width_(config.kernel.size() / 2)
+                         uint8_t                       threshold,
+                         BoundaryPolicy                policy
+#ifdef CYNLR_PERF_BUILD
+                         , IQueue<FilteredPacket>*     perf_queue
+#endif
+                         )
+    : config_(config),
+      in_queue_(in_queue),
+      out_queue_(out_queue),
+      threshold_(static_cast<float>(threshold)),
+      policy_(policy),
+      window_(config.kernel.size()),
+      half_width_(config.kernel.size() / 2)
+#ifdef CYNLR_PERF_BUILD
+      , perf_queue_(perf_queue)
+#endif
 {
     if (config.kernel.empty())
         throw std::invalid_argument("FilterBlock: kernel must not be empty");
@@ -207,13 +214,12 @@ void FilterBlock::flushRowEnd(uint8_t  edge_value,
     }
 
     if (pending_.has_b1 && !pending_.has_b2) {
-        FilteredPacket fp;
-        fp.b1  = pending_.b1;
-        fp.b2  = 0;             // no second pixel — padding artifact
-        fp.row = pending_.row;
-        fp.col = pending_.col;
-        out_queue_.push(fp);
-        pending_ = PendingOutput{};
+        pending_.b2     = 0;       // padding artifact — not a real pixel
+        pending_.has_b2 = true;
+#ifdef CYNLR_PERF_BUILD
+        pending_.t2 = pending_.t1; // no real pixel; reuse t1 so gap = 0
+#endif
+        emitIfReady();
     }
 }
 
@@ -284,6 +290,17 @@ void FilterBlock::emitIfReady() {
     #endif
 
     out_queue_.push(fp);
+        // ────────────────────────────────────────────────────────────────
+    // PERF observer: mirror the packet into the side-channel queue
+    // (non-blocking, safe to call if perf_queue_ is nullptr)
+    // ────────────────────────────────────────────────────────────────
+    #ifdef CYNLR_PERF_BUILD
+        if (perf_queue_) {
+            perf_queue_->push(fp);
+        }
+    #endif
+
+    
     pending_ = PendingOutput{};
 }
 

@@ -1,0 +1,13 @@
+======================================================== 
+ multiThread   T=100 ns                                      
+ Date/Time : 16-05-2026 13:44:48.93                               
+ Exe       : build\bin\CynLr_multiThread.exe                                       
+ Config    : src\config.cfg                               
+======================================================== 
+                                                         
+Loading config...
+argc : 2
+CLI Arg: --config=src\config.cfg
+[ConfigManager] Detected config path from CLI: src\config.cfg
+[ConfigManager] Config Path : src\config.cfg
+[ERROR] Config: Invalid config: columns (m) must be > 0

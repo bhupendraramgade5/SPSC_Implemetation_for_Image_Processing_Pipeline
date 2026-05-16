@@ -401,7 +401,9 @@ TEST(filter_empty_kernel_throws) {
     SimpleQueue<FilteredPacket> out_q;
 
     ASSERT_THROWS(
-        FilterBlock(cfg, in_q, out_q, static_cast<uint8_t>(128)),
+        FilterBlock(cfg, in_q, out_q,
+                    static_cast<uint8_t>(128),
+                    BoundaryPolicy::ZERO_PAD),
         std::invalid_argument
     );
 }
@@ -412,7 +414,9 @@ TEST(filter_even_kernel_size_throws) {
     SimpleQueue<FilteredPacket> out_q;
 
     ASSERT_THROWS(
-        FilterBlock(cfg, in_q, out_q, static_cast<uint8_t>(128)),
+        FilterBlock(cfg, in_q, out_q,
+                    static_cast<uint8_t>(128),
+                    BoundaryPolicy::ZERO_PAD),
         std::invalid_argument
     );
 }

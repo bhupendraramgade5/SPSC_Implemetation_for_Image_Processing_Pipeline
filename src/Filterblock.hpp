@@ -25,8 +25,13 @@ public:
     FilterBlock(const SystemConfig&           config,
                 IQueue<DataPacket>&           in_queue,
                 IQueue<FilteredPacket>&       out_queue,
-                uint8_t                   threshold,
-                BoundaryPolicy                policy = BoundaryPolicy::REPLICATE);
+                uint8_t                       threshold,
+                BoundaryPolicy                policy
+#ifdef CYNLR_PERF_BUILD
+                , IQueue<FilteredPacket>*     perf_queue = nullptr
+#endif
+                );
+
     void run();
     void stop();
 private:
@@ -60,6 +65,13 @@ private:
         #endif
     };
     PendingOutput pending_;
+
+    // ────────────────────────────────────────────────────────────────
+    // PERF observer side-channel (compiles away without CYNLR_PERF_BUILD)
+    // ────────────────────────────────────────────────────────────────
+#ifdef CYNLR_PERF_BUILD
+    IQueue<FilteredPacket>* perf_queue_ = nullptr;
+#endif
 
     std::atomic<bool> running_{true};
 };
