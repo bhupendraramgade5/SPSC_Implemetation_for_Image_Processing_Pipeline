@@ -22,12 +22,15 @@
 
 #include "ConfigManager.hpp"  
 
-
+// ============================================================================
+// GeneratorBlock
+// ---------------------------------------------------------------------------- 
+// Responsibbility :  Used to store the Generated and emit the DataPackets/pixels for random generation mode
 
 class RandomDataSource : public IDataSource {
 public:
-    // [CHANGED] seed=0 → use std::random_device (non-deterministic, default).
-    //           seed≠0 → seed mt19937 deterministically for reproducible runs.
+    // seed=0 → use std::random_device (non-deterministic, default).
+    // seed≠0 → seed mt19937 deterministically for reproducible runs.
     explicit RandomDataSource(size_t columns, uint32_t seed = 0);
 
     bool next(DataPacket& packet) override;
